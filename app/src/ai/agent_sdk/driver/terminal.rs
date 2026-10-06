@@ -796,10 +796,6 @@ pub(crate) struct CommandHandle {
 impl CommandHandle {
     /// A handle for a child process that runs outside the terminal session and reports its
     /// exit status through `exit_status_rx`.
-    #[allow(
-        dead_code,
-        reason = "the ACP harness runner that consumes this lands in a follow-up"
-    )]
     pub fn for_detached_process(
         exit_status_rx: oneshot::Receiver<Result<ExitCode, AgentDriverError>>,
     ) -> Self {

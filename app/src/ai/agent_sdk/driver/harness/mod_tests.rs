@@ -1,9 +1,9 @@
 use warp_cli::agent::{Harness, HarnessTransport};
 
 use super::{
-    AcpLaunchSpec, HARNESS_FAILURE_OUTPUT_TRUNCATION_MARKER, HarnessKind, HarnessTransportMode,
-    auth_check_command_for, harness_kind, prepare_harness_failure_output, renders_natively,
-    validate_cli_installed,
+    AcpLaunchSpec, ClaudeHarness, HARNESS_FAILURE_OUTPUT_TRUNCATION_MARKER, HarnessKind,
+    HarnessTransportMode, ThirdPartyHarness, auth_check_command_for, harness_kind,
+    prepare_harness_failure_output, renders_natively, validate_cli_installed,
 };
 use crate::ai::agent_sdk::driver::AgentDriverError;
 
@@ -121,22 +121,28 @@ fn acp_transport_rejects_harnesses_without_a_launch() {
 }
 
 #[test]
-fn acp_transport_is_not_available_yet_even_with_a_launch() {
-    let err =
-        harness_kind(Harness::Claude, &HarnessTransportMode::Acp { launch: None }).unwrap_err();
-    let (_, reason) = assert_harness_setup_failed(&err);
-    assert!(reason.contains("claude-code-acp"), "{reason}");
+fn acp_transport_keeps_the_harness_identity_and_skips_cli_session_tracking() {
+    let kind = harness_kind(Harness::Claude, &HarnessTransportMode::Acp { launch: None }).unwrap();
+    assert_eq!(kind.harness(), Harness::Claude);
+    let HarnessKind::ThirdParty(harness) = kind else {
+        panic!("ACP transport should produce a third-party harness");
+    };
+    assert!(!harness.drives_cli_agent_session());
+    assert_eq!(
+        harness.auth_check_command(),
+        ClaudeHarness.auth_check_command(),
+        "auth preflight is a property of the harness, not the transport"
+    );
 
     let launch = AcpLaunchSpec::from_command_line("npx -y some-acp-agent").unwrap();
-    let err = harness_kind(
+    let kind = harness_kind(
         Harness::Oz,
         &HarnessTransportMode::Acp {
             launch: Some(launch),
         },
     )
-    .unwrap_err();
-    let (_, reason) = assert_harness_setup_failed(&err);
-    assert!(reason.contains("npx"), "{reason}");
+    .unwrap();
+    assert_eq!(kind.harness(), Harness::Oz);
 }
 
 #[test]

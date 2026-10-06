@@ -587,7 +587,7 @@ const CODEX_MODEL_REASONING_EFFORT_KEY: &str = "model_reasoning_effort";
 /// TODO: Ideally, we would make this server-driven so we don't depend on a client
 /// release to change this.
 const CODEX_MODEL_MIGRATIONS_TARGET: &str = "gpt-5.4";
-fn prepare_codex_environment_config(
+pub(super) fn prepare_codex_environment_config(
     workspace_root: &Path,
     harness_working_dir: &Path,
     system_prompt: Option<&str>,
