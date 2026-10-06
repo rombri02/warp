@@ -10,7 +10,7 @@ use warp_cli::agent::Harness;
 use crate::ai::agent_sdk::driver::AgentDriverError;
 use crate::ai::agent_sdk::driver::harness::claude_code::prepare_claude_environment_config;
 use crate::ai::agent_sdk::driver::harness::{
-    HarnessKind, harness_kind, harness_model_env_vars,
+    HarnessKind, HarnessTransportMode, harness_kind, harness_model_env_vars,
     remove_claude_externally_managed_listener_env_vars,
 };
 use crate::ai::agent_sdk::{task_env_vars, validate_cli_installed};
@@ -199,7 +199,8 @@ pub(super) async fn prepare_local_harness_child_launch(
                     )
                 })?;
             let HarnessKind::ThirdParty(third_party_harness) =
-                harness_kind(harness).map_err(|error: AgentDriverError| error.to_string())?
+                harness_kind(harness, &HarnessTransportMode::Pty)
+                    .map_err(|error: AgentDriverError| error.to_string())?
             else {
                 unreachable!("Claude resolves to a third-party harness")
             };
@@ -220,7 +221,8 @@ pub(super) async fn prepare_local_harness_child_launch(
         }
         Harness::Codex => {
             let HarnessKind::ThirdParty(third_party_harness) =
-                harness_kind(harness).map_err(|error: AgentDriverError| error.to_string())?
+                harness_kind(harness, &HarnessTransportMode::Pty)
+                    .map_err(|error: AgentDriverError| error.to_string())?
             else {
                 unreachable!("Codex resolves to a third-party harness")
             };

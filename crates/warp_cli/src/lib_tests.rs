@@ -4,7 +4,7 @@ use clap::Parser;
 
 use super::*;
 use crate::agent::{
-    AgentCommand, Harness, OutputFormat, RepositoryForge, RepositoryHeadRef,
+    AgentCommand, Harness, HarnessTransport, OutputFormat, RepositoryForge, RepositoryHeadRef,
     RepositoryPreparationOverride,
 };
 use crate::artifact::ArtifactCommand;
@@ -139,6 +139,60 @@ fn agent_run_rejects_malformed_sparse_repository_substitution_payloads() {
         ])
         .expect_err("invalid repository preparation payload must fail parsing");
     }
+}
+
+#[test]
+fn agent_run_parses_harness_transport_and_acp_agent() {
+    let parse = |extra: &[&str]| {
+        let args = Args::try_parse_from(
+            [
+                "warp",
+                "agent",
+                "run",
+                "--prompt",
+                "hi",
+                "--harness",
+                "claude",
+            ]
+            .into_iter()
+            .chain(extra.iter().copied()),
+        )
+        .unwrap();
+        let Some(Command::CommandLine(boxed_cmd)) = args.command else {
+            panic!("Expected `warp agent run` command");
+        };
+        let CliCommand::Agent(AgentCommand::Run(run_args)) = *boxed_cmd else {
+            panic!("Expected `warp agent run` command");
+        };
+        run_args
+    };
+
+    let default = parse(&[]);
+    assert_eq!(default.harness_transport, None);
+    assert_eq!(default.acp_agent, None);
+
+    let acp = parse(&["--harness-transport", "acp"]);
+    assert_eq!(acp.harness_transport, Some(HarnessTransport::Acp));
+
+    let pty = parse(&["--harness-transport", "pty"]);
+    assert_eq!(pty.harness_transport, Some(HarnessTransport::Pty));
+
+    let overridden = parse(&["--acp-agent", "npx -y @zed-industries/codex-acp"]);
+    assert_eq!(
+        overridden.acp_agent.as_deref(),
+        Some("npx -y @zed-industries/codex-acp")
+    );
+
+    Args::try_parse_from([
+        "warp",
+        "agent",
+        "run",
+        "--prompt",
+        "hi",
+        "--harness-transport",
+        "telepathy",
+    ])
+    .expect_err("unknown transports must fail parsing");
 }
 
 #[test]

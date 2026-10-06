@@ -6,7 +6,7 @@ use cloud_object_models::CodeForge;
 use command::blocking::Command as ProcessCommand;
 use serde_json::json;
 use warp_cli::agent::{
-    AgentCommand, Harness, OutputFormat, RepositoryForge, RepositoryHeadRef,
+    AgentCommand, Harness, HarnessTransport, OutputFormat, RepositoryForge, RepositoryHeadRef,
     RepositoryPreparationOverride, RunAgentArgs,
 };
 use warp_cli::artifact::{
@@ -22,9 +22,9 @@ use warpui::{App, SingletonEntity, WindowId};
 use super::{
     AgentDriverRunner, CommandAuthentication, command_authentication, command_requires_auth,
     command_to_telemetry_event, reconcile_task_harness, resolve_agent_driver_team_scope,
-    validated_driver_repositories_for_preparation,
+    resolve_harness_transport_mode, validated_driver_repositories_for_preparation,
 };
-use crate::ai::agent_sdk::driver::harness::HarnessKind;
+use crate::ai::agent_sdk::driver::harness::{AcpLaunchSpec, HarnessKind, HarnessTransportMode};
 use crate::ai::agent_sdk::driver::{AgentDriverError, AgentDriverOptions, AgentRunPrompt, Task};
 use crate::ai::ambient_agents::task::{AmbientAgentTask, AmbientAgentTaskState, TaskScope};
 use crate::ai::cloud_environments::{AmbientAgentEnvironment, SourceRepo};
@@ -160,6 +160,7 @@ pub(crate) fn agent_driver_options() -> AgentDriverOptions {
         repository_preparation_overrides: vec![],
         remove_repository_origins: false,
         selected_harness: Harness::Oz,
+        harness_transport: HarnessTransportMode::Pty,
         third_party_harness_model_config: None,
         team_scope: None,
         bedrock_oidc_credentials: None,
@@ -721,8 +722,13 @@ fn run_message_send_telemetry_defaults_to_unknown_harness() {
 #[test]
 fn reconcile_task_harness_adopts_task_harness_when_cli_uses_default() {
     let mut selected_harness = Harness::Oz;
-    let harness = reconcile_task_harness(TASK_ID, &mut selected_harness, Harness::Claude)
-        .expect("default harness should adopt task harness");
+    let harness = reconcile_task_harness(
+        TASK_ID,
+        &mut selected_harness,
+        Harness::Claude,
+        &HarnessTransportMode::Pty,
+    )
+    .expect("default harness should adopt task harness");
 
     assert_eq!(selected_harness, Harness::Claude);
     assert_eq!(harness.harness(), Harness::Claude);
@@ -731,8 +737,13 @@ fn reconcile_task_harness_adopts_task_harness_when_cli_uses_default() {
 #[test]
 fn reconcile_task_harness_allows_matching_explicit_harness() {
     let mut selected_harness = Harness::Claude;
-    let harness = reconcile_task_harness(TASK_ID, &mut selected_harness, Harness::Claude)
-        .expect("matching harness should succeed");
+    let harness = reconcile_task_harness(
+        TASK_ID,
+        &mut selected_harness,
+        Harness::Claude,
+        &HarnessTransportMode::Pty,
+    )
+    .expect("matching harness should succeed");
 
     assert_eq!(selected_harness, Harness::Claude);
     assert_eq!(harness.harness(), Harness::Claude);
@@ -741,13 +752,60 @@ fn reconcile_task_harness_allows_matching_explicit_harness() {
 #[test]
 fn reconcile_task_harness_rejects_explicit_mismatch() {
     let mut selected_harness = Harness::Gemini;
-    let err = reconcile_task_harness(TASK_ID, &mut selected_harness, Harness::Claude)
-        .expect_err("mismatched harness should fail");
+    let err = reconcile_task_harness(
+        TASK_ID,
+        &mut selected_harness,
+        Harness::Claude,
+        &HarnessTransportMode::Pty,
+    )
+    .expect_err("mismatched harness should fail");
 
     assert_eq!(selected_harness, Harness::Gemini);
     assert!(err.to_string().contains("Task"));
     assert!(err.to_string().contains("--harness gemini"));
     assert!(err.to_string().contains("claude"));
+}
+
+#[test]
+fn reconcile_task_harness_keeps_the_requested_transport() {
+    let mut selected_harness = Harness::Oz;
+    let err = reconcile_task_harness(
+        TASK_ID,
+        &mut selected_harness,
+        Harness::Claude,
+        &HarnessTransportMode::Acp { launch: None },
+    )
+    .expect_err("ACP transport is not wired up yet");
+
+    assert_eq!(selected_harness, Harness::Claude);
+    assert!(err.to_string().contains("ACP transport"), "{err}");
+}
+
+#[test]
+fn harness_transport_mode_defaults_to_pty_and_honors_acp_agent_override() {
+    let mut args = parse_run_agent_args(&["agent", "run", "--prompt", "hi"]);
+    assert_eq!(
+        resolve_harness_transport_mode(&args).unwrap(),
+        HarnessTransportMode::Pty
+    );
+
+    args.harness_transport = Some(HarnessTransport::Acp);
+    assert_eq!(
+        resolve_harness_transport_mode(&args).unwrap(),
+        HarnessTransportMode::Acp { launch: None }
+    );
+
+    args.harness_transport = None;
+    args.acp_agent = Some("npx -y @zed-industries/codex-acp".to_string());
+    assert_eq!(
+        resolve_harness_transport_mode(&args).unwrap(),
+        HarnessTransportMode::Acp {
+            launch: Some(AcpLaunchSpec {
+                program: "npx".to_string(),
+                args: vec!["-y".to_string(), "@zed-industries/codex-acp".to_string()],
+            }),
+        }
+    );
 }
 
 #[test]

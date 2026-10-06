@@ -51,8 +51,9 @@ use crate::ai::agent_sdk::driver::harness::exit_escalation::{
     ExitEscalation, ExitEscalationAction, ExitEscalationEvent, driver_result_after_harness_run,
 };
 use crate::ai::agent_sdk::driver::harness::{
-    HarnessCleanupDisposition, HarnessKind, HarnessRunner, ResumePayload, SavePoint,
-    ThirdPartyHarness, ThirdPartyHarnessTelemetryEvent, harness_model_env_vars, task_env_vars,
+    HarnessCleanupDisposition, HarnessKind, HarnessRunner, HarnessTransportMode, ResumePayload,
+    SavePoint, ThirdPartyHarness, ThirdPartyHarnessTelemetryEvent, harness_model_env_vars,
+    renders_natively, task_env_vars,
 };
 use crate::ai::agent_sdk::environment_snapshot::{
     EnvironmentSnapshot, EnvironmentSnapshotReporter,
@@ -631,6 +632,8 @@ pub struct AgentDriverOptions {
     pub remove_repository_origins: bool,
     /// Selected execution harness for this run.
     pub selected_harness: Harness,
+    /// How the selected harness is driven. Only used for non-Oz harnesses.
+    pub(crate) harness_transport: HarnessTransportMode,
     /// Model config for the selected harness. Only used for non-Oz harnesses.
     pub third_party_harness_model_config: Option<HarnessModelConfig>,
     /// Stable team scope assigned to this run and its headless window.
@@ -1097,6 +1100,7 @@ impl AgentDriver {
             repository_preparation_overrides,
             remove_repository_origins,
             selected_harness,
+            harness_transport,
             third_party_harness_model_config,
             team_scope,
             bedrock_oidc_credentials,
@@ -1189,11 +1193,14 @@ impl AgentDriver {
         )?;
 
         // Sharing starts asynchronously from terminal creation, before run_internal's setup waits.
+        let native_queue_enabled =
+            renders_natively(selected_harness, harness_transport.transport())
+                && (should_share || task_id.is_some());
         log::info!(
-            "event=driver_queue_configuration task_id={task_id:?} harness={selected_harness} sharing_requested={should_share} native_queue_enabled={}",
-            selected_harness == Harness::Oz && (should_share || task_id.is_some()),
+            "event=driver_queue_configuration task_id={task_id:?} harness={selected_harness} transport={:?} sharing_requested={should_share} native_queue_enabled={native_queue_enabled}",
+            harness_transport.transport(),
         );
-        if selected_harness == Harness::Oz && (should_share || task_id.is_some()) {
+        if native_queue_enabled {
             let terminal = terminal_driver.as_ref(ctx).terminal_view().clone();
             terminal.update(ctx, |terminal, ctx| {
                 terminal.ai_controller().update(ctx, |controller, ctx| {

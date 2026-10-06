@@ -15,7 +15,8 @@ pub(crate) use driver::harness::{ClaudeHarness, task_env_vars, validate_cli_inst
 use telemetry::CliTelemetryEvent;
 use tracing::Instrument as _;
 use warp_cli::agent::{
-    AgentCommand, AgentProfileCommand, Harness, OutputFormat, Prompt, RunAgentArgs,
+    AgentCommand, AgentProfileCommand, Harness, HarnessTransport, OutputFormat, Prompt,
+    RunAgentArgs,
 };
 use warp_cli::api_key::ApiKeyCommand;
 use warp_cli::artifact::ArtifactCommand;
@@ -48,7 +49,9 @@ use crate::ai::agent::api::convert_conversation::{
     RestorationMode, convert_conversation_data_to_ai_conversation,
 };
 use crate::ai::agent::conversation::AIConversationId;
-use crate::ai::agent_sdk::driver::harness::{HarnessKind, harness_kind};
+use crate::ai::agent_sdk::driver::harness::{
+    AcpLaunchSpec, HarnessKind, HarnessTransportMode, harness_kind,
+};
 use crate::ai::agent_sdk::driver::{AgentDriverOptions, AgentRunPrompt, Task};
 use crate::ai::agent_sdk::mcp_config::build_mcp_servers_from_specs;
 use crate::ai::agent_sdk::setup_observability::{
@@ -328,6 +331,16 @@ fn run_agent(
                     "The opencode harness is only supported for local child agent launches."
                 ));
             }
+            if !FeatureFlag::AcpHarness.is_enabled() {
+                if args.harness_transport.is_some() {
+                    return Err(anyhow::anyhow!(
+                        "unexpected argument '--harness-transport' found"
+                    ));
+                }
+                if args.acp_agent.is_some() {
+                    return Err(anyhow::anyhow!("unexpected argument '--acp-agent' found"));
+                }
+            }
 
             let server_api = ServerApiProvider::handle(ctx).as_ref(ctx).get_ai_client();
 
@@ -515,10 +528,27 @@ fn build_merged_config_and_task(
         model: model_override,
         profile: args.profile.clone(),
         mcp_specs: runtime_mcp_specs,
-        harness: harness_kind(args.harness)?,
+        harness: harness_kind(args.harness, &resolve_harness_transport_mode(args)?)?,
     };
 
     Ok((merged_config, task))
+}
+
+/// Resolves how the run drives its harness. `--acp-agent` implies the ACP transport with the
+/// given command replacing the launch table entry; otherwise `--harness-transport` (or its
+/// environment variable) decides, defaulting to the terminal-based CLI.
+fn resolve_harness_transport_mode(
+    args: &RunAgentArgs,
+) -> Result<HarnessTransportMode, AgentDriverError> {
+    if let Some(command_line) = args.acp_agent.as_deref() {
+        return Ok(HarnessTransportMode::Acp {
+            launch: Some(AcpLaunchSpec::from_command_line(command_line)?),
+        });
+    }
+    Ok(match args.harness_transport.unwrap_or_default() {
+        HarnessTransport::Pty => HarnessTransportMode::Pty,
+        HarnessTransport::Acp => HarnessTransportMode::Acp { launch: None },
+    })
 }
 
 /// Build the task for server-side prompt resolution (task_id is set).
@@ -588,7 +618,7 @@ fn build_server_side_task(
         model: model_override,
         profile,
         mcp_specs: runtime_mcp_specs,
-        harness: harness_kind(args.harness)?,
+        harness: harness_kind(args.harness, &resolve_harness_transport_mode(args)?)?,
     };
 
     Ok((config, task))
@@ -598,6 +628,7 @@ fn reconcile_task_harness(
     task_id: &str,
     selected_harness: &mut Harness,
     task_harness: Harness,
+    transport: &HarnessTransportMode,
 ) -> Result<HarnessKind, AgentDriverError> {
     if *selected_harness == Harness::Oz {
         *selected_harness = task_harness;
@@ -609,7 +640,7 @@ fn reconcile_task_harness(
         });
     }
 
-    harness_kind(*selected_harness)
+    harness_kind(*selected_harness, transport)
 }
 
 /// Resolve a `Prompt` to a plain string.
@@ -1192,6 +1223,7 @@ impl AgentDriverRunner {
                     repository_preparation_overrides: args.repository_preparation_overrides.clone(),
                     remove_repository_origins: args.remove_repository_origins,
                     selected_harness: args.harness,
+                    harness_transport: resolve_harness_transport_mode(&args)?,
                     third_party_harness_model_config,
                     team_scope: None,
                     bedrock_oidc_credentials: None,
@@ -1503,6 +1535,7 @@ impl AgentDriverRunner {
                 &task_id_str,
                 &mut driver_options.selected_harness,
                 task_harness,
+                &driver_options.harness_transport,
             )?;
         }
 

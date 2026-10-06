@@ -1,8 +1,9 @@
-use warp_cli::agent::Harness;
+use warp_cli::agent::{Harness, HarnessTransport};
 
 use super::{
-    HARNESS_FAILURE_OUTPUT_TRUNCATION_MARKER, auth_check_command_for,
-    prepare_harness_failure_output, validate_cli_installed,
+    AcpLaunchSpec, HARNESS_FAILURE_OUTPUT_TRUNCATION_MARKER, HarnessKind, HarnessTransportMode,
+    auth_check_command_for, harness_kind, prepare_harness_failure_output, renders_natively,
+    validate_cli_installed,
 };
 use crate::ai::agent_sdk::driver::AgentDriverError;
 
@@ -92,4 +93,57 @@ fn auth_check_command_for_unknown_is_none() {
     // Harness::Unknown causes harness_kind to return Err; the helper still
     // returns None instead of panicking.
     assert!(auth_check_command_for(Harness::Unknown).is_none());
+}
+
+#[test]
+fn pty_transport_keeps_existing_harness_dispatch() {
+    for (harness, expected) in [
+        (Harness::Oz, Harness::Oz),
+        (Harness::Claude, Harness::Claude),
+        (Harness::Codex, Harness::Codex),
+        (Harness::Gemini, Harness::Gemini),
+    ] {
+        let kind = harness_kind(harness, &HarnessTransportMode::Pty).unwrap();
+        assert_eq!(kind.harness(), expected);
+    }
+    assert!(matches!(
+        harness_kind(Harness::OpenCode, &HarnessTransportMode::Pty).unwrap(),
+        HarnessKind::Unsupported(Harness::OpenCode)
+    ));
+}
+
+#[test]
+fn acp_transport_rejects_harnesses_without_a_launch() {
+    let err = harness_kind(Harness::Oz, &HarnessTransportMode::Acp { launch: None }).unwrap_err();
+    let (harness, reason) = assert_harness_setup_failed(&err);
+    assert_eq!(harness, "oz");
+    assert!(reason.contains("cannot be driven over ACP"), "{reason}");
+}
+
+#[test]
+fn acp_transport_is_not_available_yet_even_with_a_launch() {
+    let err =
+        harness_kind(Harness::Claude, &HarnessTransportMode::Acp { launch: None }).unwrap_err();
+    let (_, reason) = assert_harness_setup_failed(&err);
+    assert!(reason.contains("claude-code-acp"), "{reason}");
+
+    let launch = AcpLaunchSpec::from_command_line("npx -y some-acp-agent").unwrap();
+    let err = harness_kind(
+        Harness::Oz,
+        &HarnessTransportMode::Acp {
+            launch: Some(launch),
+        },
+    )
+    .unwrap_err();
+    let (_, reason) = assert_harness_setup_failed(&err);
+    assert!(reason.contains("npx"), "{reason}");
+}
+
+#[test]
+fn only_oz_and_acp_runs_render_natively() {
+    assert!(renders_natively(Harness::Oz, HarnessTransport::Pty));
+    assert!(renders_natively(Harness::Oz, HarnessTransport::Acp));
+    assert!(renders_natively(Harness::Claude, HarnessTransport::Acp));
+    assert!(!renders_natively(Harness::Claude, HarnessTransport::Pty));
+    assert!(!renders_natively(Harness::Codex, HarnessTransport::Pty));
 }

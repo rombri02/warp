@@ -403,6 +403,16 @@ impl fmt::Display for Harness {
     }
 }
 
+/// How the agent driver talks to a third-party harness.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Default, ValueEnum)]
+pub enum HarnessTransport {
+    /// Run the harness CLI interactively inside the driver's terminal session.
+    #[default]
+    Pty,
+    /// Spawn the harness as a child process and drive it over the Agent Client Protocol.
+    Acp,
+}
+
 #[cfg(test)]
 #[path = "agent_tests.rs"]
 mod tests;
@@ -613,6 +623,26 @@ pub struct RunAgentArgs {
     /// "claude" delegates to the `claude` CLI.
     #[arg(long = "harness", value_name = "HARNESS", default_value_t = Harness::Oz, hide = true)]
     pub harness: Harness,
+
+    /// How to drive a third-party harness. Unset means the harness's interactive CLI runs in the
+    /// terminal session; `acp` spawns the harness as a child process speaking the Agent Client
+    /// Protocol over stdio. Has no effect on the `oz` harness.
+    ///
+    /// Cloud workers set this through `OZ_HARNESS_TRANSPORT` rather than the flag, so a pinned
+    /// CLI predating this option ignores it instead of rejecting an unknown argument.
+    #[arg(
+        long = "harness-transport",
+        value_name = "TRANSPORT",
+        env = "OZ_HARNESS_TRANSPORT",
+        hide = true
+    )]
+    pub harness_transport: Option<HarnessTransport>,
+
+    /// Command line of an ACP agent to launch instead of the selected harness's own ACP
+    /// launch command, e.g. `npx -y @zed-industries/codex-acp`. Implies
+    /// `--harness-transport acp`.
+    #[arg(long = "acp-agent", value_name = "COMMAND", hide = true)]
+    pub acp_agent: Option<String>,
 
     /// Skip the initial LLM turn for this run. Used by the empty-prompt cloud-handoff
     /// path so the cloud agent comes up ready for follow-up without hallucinating a
