@@ -3,6 +3,11 @@
 //!
 //! The `BlocklistAIController` orchestrates state updates and service calls to power the
 //! Agent Mode UI.
+#[allow(
+    dead_code,
+    reason = "the ACP harness runner that drives these turns lands in a follow-up"
+)]
+pub(crate) mod external_harness;
 pub mod input_context;
 mod pending_response_streams;
 pub mod response_stream;
@@ -341,6 +346,9 @@ pub struct BlocklistAIController {
 
     shared_session_state: shared_session::SharedSessionState,
     native_prompt_conversation_id: Option<AIConversationId>,
+    /// When set, prompts injected into the bound native conversation are handed to an external
+    /// harness driving it instead of being sent to Warp's agent.
+    external_harness_prompt_sink: Option<async_channel::Sender<String>>,
 
     /// Ambient agent task ID attached to this controller. This is a property of the controller, and not an individual
     /// conversation, because the ambient agent task driver owns the entire Warp window working on a task, and any
@@ -484,12 +492,13 @@ impl BlocklistAIController {
             }
 
             let history_model = BlocklistAIHistoryModel::handle(ctx);
-            let Some((is_viewing_shared_session, is_entirely_passive_code_diff)) = history_model
+            let Some((is_externally_driven, is_entirely_passive_code_diff)) = history_model
                 .as_ref(ctx)
                 .conversation(conversation_id)
                 .map(|conversation| {
                     (
-                        conversation.is_viewing_shared_session(),
+                        conversation.is_viewing_shared_session()
+                            || conversation.reconstructs_inputs_from_messages(),
                         conversation.is_entirely_passive_code_diff(),
                     )
                 })
@@ -497,9 +506,10 @@ impl BlocklistAIController {
                 return;
             };
 
-            // Viewer sessions should not send follow-ups.
-            // They only act as passive viewers of the action stream.
-            if is_viewing_shared_session {
+            // Viewer sessions and conversations driven by an external harness should not send
+            // follow-ups or settle status from action results; they only mirror the action
+            // stream, and the harness decides when the turn is over.
+            if is_externally_driven {
                 return;
             }
 
@@ -677,6 +687,7 @@ impl BlocklistAIController {
             should_refresh_available_llms_on_stream_finish: false,
             shared_session_state: shared_session::SharedSessionState::default(),
             native_prompt_conversation_id: None,
+            external_harness_prompt_sink: None,
             ambient_agent_task_id: None,
             attachments_download_dir: None,
             pending_auto_resume_handles: HashMap::new(),
@@ -3179,6 +3190,39 @@ impl BlocklistAIController {
             .try_cancel_stream(response_stream_id, reason, ctx)
     }
 
+    /// Forwards a response event to shared-session viewers when this controller is the sharer.
+    fn tee_response_event_to_viewers(
+        &self,
+        event: &warp_multi_agent_api::ResponseEvent,
+        conversation_id: AIConversationId,
+        ctx: &AppContext,
+    ) {
+        if !FeatureFlag::AgentSharedSessions.is_enabled() {
+            return;
+        }
+        let mut model = self.terminal_model.lock();
+        if !model.shared_session_status().is_sharer() {
+            return;
+        }
+        // Get the participant who initiated this response, falling back to the sharer if needed.
+        let participant_id = self
+            .get_current_response_initiator()
+            .or_else(|| self.get_sharer_participant_id());
+
+        // For forked conversations (e.g. when loading from cloud), include the original
+        // conversation token so viewers can link the new server-assigned token to their existing
+        // conversation. The token is cleared after the first Init event, so it's only sent once
+        // per forked conversation.
+        let forked_from_token = BlocklistAIHistoryModel::as_ref(ctx)
+            .conversation(&conversation_id)
+            .and_then(|conv| {
+                conv.forked_from_server_conversation_token()
+                    .map(|t| t.as_str().to_string())
+            });
+
+        model.send_agent_response_for_shared_session(event, participant_id, forked_from_token);
+    }
+
     fn handle_response_stream_event(
         &mut self,
         did_input_contain_user_query: bool,
@@ -3207,36 +3251,7 @@ impl BlocklistAIController {
                 let history_model = BlocklistAIHistoryModel::handle(ctx);
                 match event {
                     Ok(event) => {
-                        // If this controller is part of a shared session, forward the entire response event to viewers first.
-                        if FeatureFlag::AgentSharedSessions.is_enabled() {
-                            let mut model = self.terminal_model.lock();
-                            if model.shared_session_status().is_sharer() {
-                                // Get the participant who initiated this response, falling back to the sharer if needed.
-                                let participant_id = self
-                                    .get_current_response_initiator()
-                                    .or_else(|| self.get_sharer_participant_id());
-
-                                // For forked conversations (e.g. when loading from cloud), include
-                                // the original conversation token so viewers can link the new
-                                // server-assigned token to their existing conversation.
-                                //
-                                // This token is cleared after the first Init event (see below),
-                                // so it's only sent once per forked conversation.
-                                let forked_from_token = history_model
-                                    .as_ref(ctx)
-                                    .conversation(&conversation_id)
-                                    .and_then(|conv| {
-                                        conv.forked_from_server_conversation_token()
-                                            .map(|t| t.as_str().to_string())
-                                    });
-
-                                model.send_agent_response_for_shared_session(
-                                    &event,
-                                    participant_id,
-                                    forked_from_token,
-                                );
-                            }
-                        }
+                        self.tee_response_event_to_viewers(&event, conversation_id, ctx);
                         let Some(event) = event.r#type else {
                             return;
                         };

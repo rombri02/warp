@@ -312,6 +312,10 @@ pub struct AIConversation {
     /// Whether this conversation is being shared from a different warp instance
     /// (i.e. is not a local conversation).
     is_viewing_shared_session: bool,
+    /// Whether tool calls in this conversation are executed outside the local action model (e.g.
+    /// by an external harness), so exchange inputs must be reconstructed from streamed tool
+    /// call result messages instead of being inserted optimistically by the executor.
+    reconstructs_inputs_from_messages: bool,
     task_store: TaskStore,
     optimistic_cli_subagent_subtask_id: Option<TaskId>,
 
@@ -479,6 +483,7 @@ impl AIConversation {
             optimistic_cli_subagent_subtask_id: None,
             code_review: None,
             is_viewing_shared_session,
+            reconstructs_inputs_from_messages: false,
             is_cli_agent_transcript,
             todo_lists: vec![],
             status: ConversationStatus::InProgress,
@@ -732,6 +737,7 @@ impl AIConversation {
         Ok(Self {
             id,
             is_viewing_shared_session: false,
+            reconstructs_inputs_from_messages: false,
             is_cli_agent_transcript: false,
             task_store,
             status,
@@ -794,6 +800,18 @@ impl AIConversation {
 
     pub fn set_is_viewing_shared_session(&mut self, is_viewing_shared_session: bool) {
         self.is_viewing_shared_session = is_viewing_shared_session;
+    }
+
+    pub fn set_reconstructs_inputs_from_messages(&mut self, value: bool) {
+        self.reconstructs_inputs_from_messages = value;
+    }
+
+    pub fn reconstructs_inputs_from_messages(&self) -> bool {
+        self.reconstructs_inputs_from_messages
+    }
+
+    fn should_reconstruct_inputs_from_messages(&self) -> bool {
+        self.is_viewing_shared_session || self.reconstructs_inputs_from_messages
     }
 
     pub fn is_cli_agent_transcript(&self) -> bool {
@@ -2939,7 +2957,7 @@ impl AIConversation {
                             // sent on this client). Once we reconstruct these inputs, we will insert them
                             // to mimic the normal conversation flow. (If this is not a shared session, the
                             // exchange inputs will already be populated).
-                            self.is_viewing_shared_session,
+                            self.should_reconstruct_inputs_from_messages(),
                         );
 
                         // Subtasks can come pre-populated with messages (for example: an advice subagent
@@ -3275,7 +3293,7 @@ impl AIConversation {
                     // sent on this client). Once we reconstruct these inputs, we will insert them
                     // to mimic the normal conversation flow. (If this is not a shared session, the
                     // exchange inputs will already be populated).
-                    self.is_viewing_shared_session,
+                    self.should_reconstruct_inputs_from_messages(),
                 )?;
 
                 self.task_store.insert(task);
@@ -3362,7 +3380,7 @@ impl AIConversation {
 
                 let current_todo_list = self.todo_lists.last().cloned();
                 let current_comment_state = self.code_review.as_ref().cloned();
-                let is_viewing_shared_session = self.is_viewing_shared_session;
+                let should_reconstruct_inputs = self.should_reconstruct_inputs_from_messages();
                 // In shared-session viewers, we have to reconstruct what the original user input
                 // was using subsequent conversation messages (as the original input was not
                 // sent on this client). Once we reconstruct these inputs, we will insert them
@@ -3380,7 +3398,7 @@ impl AIConversation {
                                 skill_path_origin,
                             },
                             mask,
-                            is_viewing_shared_session,
+                            should_reconstruct_inputs,
                         )
                         .map(|(exchange_id, msg)| (exchange_id, msg.todos_op().cloned()))
                     })

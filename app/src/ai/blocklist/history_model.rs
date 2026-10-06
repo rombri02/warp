@@ -2656,6 +2656,16 @@ impl BlocklistAIHistoryModel {
         }
     }
 
+    pub fn set_reconstructs_inputs_from_messages_for_conversation(
+        &mut self,
+        conversation_id: AIConversationId,
+        value: bool,
+    ) {
+        if let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) {
+            conversation.set_reconstructs_inputs_from_messages(value);
+        }
+    }
+
     pub fn set_has_code_review_opened_to_true(&mut self, conversation_id: AIConversationId) {
         if let Some(conversation) = self.conversations_by_id.get_mut(&conversation_id) {
             conversation.mark_code_review_as_opened();
