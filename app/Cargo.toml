@@ -304,6 +304,7 @@ wgpu.workspace = true
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 app-installation-detection.workspace = true
 async-io.workspace = true
+async-process.workspace = true
 axum.workspace = true
 build_cache.workspace = true
 cloud_object_persistence.workspace = true

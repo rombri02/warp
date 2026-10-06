@@ -140,7 +140,7 @@ fn process_group_of(pid: sysinfo::Pid) -> Option<u32> {
 }
 
 #[cfg(unix)]
-fn kill_process_group(pgid: u32) {
+pub(super) fn kill_process_group(pgid: u32) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 

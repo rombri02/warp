@@ -402,7 +402,7 @@ impl HarnessRunner for CodexHarnessRunner {
 
         *self.state.lock() = CodexRunnerState::Running {
             conversation_id,
-            block_id: command_handle.block_id().clone(),
+            block_id: command_handle.terminal_block_id()?,
         };
 
         setup_events

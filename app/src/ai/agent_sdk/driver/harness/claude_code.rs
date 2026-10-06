@@ -507,7 +507,7 @@ impl HarnessRunner for ClaudeHarnessRunner {
         // Only store conversation info once the CLI command has started.
         *self.state.lock() = ClaudeRunnerState::Running {
             conversation_id,
-            block_id: command_handle.block_id().clone(),
+            block_id: command_handle.terminal_block_id()?,
         };
 
         setup_events

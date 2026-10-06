@@ -39,6 +39,11 @@ use crate::terminal::model::block::{BlockId, SerializedBlock};
 use crate::util::path::resolve_executable;
 
 pub(crate) mod acp;
+#[allow(
+    dead_code,
+    reason = "the ACP harness runner that consumes this lands in a follow-up"
+)]
+pub(crate) mod child_process;
 pub(crate) mod claude_code;
 pub(crate) mod claude_transcript;
 mod codex;
@@ -180,6 +185,13 @@ pub(crate) trait ThirdPartyHarness: Send + Sync {
     /// Warp-installed orchestration hooks at the required version.
     fn requires_verified_platform_plugin(&self) -> bool {
         false
+    }
+
+    /// Whether the harness runs as an interactive CLI agent in the terminal whose progress is
+    /// observed through CLI agent session events and hook plugins. Harnesses that drive a native
+    /// conversation directly return `false`.
+    fn drives_cli_agent_session(&self) -> bool {
+        true
     }
 
     /// Fetch the harness-specific resume payload for an existing conversation.

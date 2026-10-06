@@ -1710,7 +1710,9 @@ async fn execute_command(
             AgentDriverError::InvalidRuntimeState => PrepareEnvironmentError::InvalidRuntimeState,
             source => PrepareEnvironmentError::TerminalDriver { source },
         })?;
-    let block_id = command_handle.block_id().clone();
+    let block_id = command_handle
+        .terminal_block_id()
+        .map_err(|_| PrepareEnvironmentError::InvalidRuntimeState)?;
     let exit_code = command_handle.await.map_err(|error| match error {
         AgentDriverError::InvalidRuntimeState => PrepareEnvironmentError::InvalidRuntimeState,
         source => PrepareEnvironmentError::TerminalDriver { source },

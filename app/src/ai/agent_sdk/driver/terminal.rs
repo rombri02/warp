@@ -586,7 +586,7 @@ impl TerminalDriver {
             );
             Ok(CommandHandle {
                 exit_status_rx: exit_rx,
-                block_id,
+                block_id: Some(block_id),
                 command_id,
                 submitted_at,
                 session_id,
@@ -780,23 +780,48 @@ pub(crate) struct BlockOutputMatch {
     pub excerpt: String,
 }
 
-/// A handle to a running terminal command.
+/// A handle to a running command.
 ///
-/// Resolves to the command's [`ExitCode`] when the block completes.
-/// Also carries the [`BlockId`] so callers can retrieve the block snapshot
-/// after completion.
+/// Resolves to the command's [`ExitCode`] when it completes. Commands executed in the terminal
+/// also carry the [`BlockId`] so callers can retrieve the block snapshot after completion;
+/// detached child processes have no block.
 pub(crate) struct CommandHandle {
     exit_status_rx: oneshot::Receiver<Result<ExitCode, AgentDriverError>>,
-    block_id: BlockId,
+    block_id: Option<BlockId>,
     command_id: Uuid,
     submitted_at: Instant,
     session_id: Option<SessionId>,
 }
 
 impl CommandHandle {
-    /// The block ID of the command that was executed.
-    pub fn block_id(&self) -> &BlockId {
-        &self.block_id
+    /// A handle for a child process that runs outside the terminal session and reports its
+    /// exit status through `exit_status_rx`.
+    #[allow(
+        dead_code,
+        reason = "the ACP harness runner that consumes this lands in a follow-up"
+    )]
+    pub fn for_detached_process(
+        exit_status_rx: oneshot::Receiver<Result<ExitCode, AgentDriverError>>,
+    ) -> Self {
+        Self {
+            exit_status_rx,
+            block_id: None,
+            command_id: Uuid::new_v4(),
+            submitted_at: Instant::now(),
+            session_id: None,
+        }
+    }
+
+    /// The block ID of the command that was executed, if it ran in the terminal.
+    pub fn block_id(&self) -> Option<&BlockId> {
+        self.block_id.as_ref()
+    }
+
+    /// The block ID of a terminal-backed command, failing for detached processes.
+    pub fn terminal_block_id(&self) -> Result<BlockId, AgentDriverError> {
+        self.block_id
+            .clone()
+            .ok_or(AgentDriverError::InvalidRuntimeState)
     }
 }
 
