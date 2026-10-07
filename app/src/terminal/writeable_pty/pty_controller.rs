@@ -88,6 +88,9 @@ pub struct PtyController<T: EventLoopSender> {
     bootstrap_file: Option<TempBootstrapFile>,
     in_flight_native_completions_results_tx:
         Option<async_channel::Sender<(Vec<ShellCompletion>, Option<Span>)>>,
+    /// Set while reattached to a pty daemon session whose replayed output is still being
+    /// processed; writing it tells the daemon to stop discarding input.
+    pty_unmute_token: Option<Vec<u8>>,
 }
 
 impl<T: EventLoopSender> PtyController<T> {
@@ -114,6 +117,11 @@ impl<T: EventLoopSender> PtyController<T> {
             }
             ModelEvent::Handler(AnsiHandlerEvent::SetBracketedPaste) => {
                 me.is_bracketed_paste_enabled = true;
+            }
+            ModelEvent::PtyReplayFinished => {
+                if let Some(token) = me.pty_unmute_token.take() {
+                    me.write_bytes(token, ctx);
+                }
             }
             ModelEvent::Handler(AnsiHandlerEvent::UnsetBracketedPaste) => {
                 me.is_bracketed_paste_enabled = false;
@@ -186,6 +194,7 @@ impl<T: EventLoopSender> PtyController<T> {
             #[cfg(not(target_family = "wasm"))]
             bootstrap_file: None,
             in_flight_native_completions_results_tx: None,
+            pty_unmute_token: None,
         }
     }
 
@@ -602,6 +611,10 @@ impl<T: EventLoopSender> PtyController<T> {
             },
             ctx,
         );
+    }
+
+    pub fn set_pty_unmute_token(&mut self, token: Vec<u8>) {
+        self.pty_unmute_token = Some(token);
     }
 
     /// Shuts down the pty and event loop.

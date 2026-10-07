@@ -19,13 +19,14 @@ use pathfinder_geometry::vector::Vector2F;
 use settings::Setting as _;
 use warp_core::SessionId;
 use warp_errors::report_error;
+use warp_terminal::focus_env::session_uuid_from_env_vars;
 use warpui::r#async::Timer;
 use warpui::r#async::executor::Background;
 use warpui::{AppContext, Entity, ModelContext, ModelHandle, SingletonEntity, ViewHandle};
 
 use super::event_loop::EventLoop;
 use super::shell::{ShellStarter, ShellStarterSource};
-use super::spawner::{PtySpawnHooks, PtySpawnMode};
+use super::spawner::{PtySpawnHooks, PtySpawnMode, PtySpawner};
 #[cfg(unix)]
 use super::terminal_attributes::TerminalAttributesPoller;
 use super::{mio_channel, recorder};
@@ -387,6 +388,26 @@ impl<S> TerminalManager<S> {
                 .read(ctx, |shells, ctx| shells.get_user_preferred_shell(ctx))
         });
         let wsl_name_or_shell_starter = ShellStarter::init(preferred_shell.clone());
+
+        // A pane reattaching to a running session gets its blocks back from the replayed
+        // output, which also persists them again.
+        let reattaching_session_uuid = session_uuid_from_env_vars(&env_vars)
+            .filter(|uuid| PtySpawner::as_ref(ctx).has_live_session(uuid))
+            .and_then(|uuid| hex::decode(uuid).ok());
+        let all_restored_blocks = match reattaching_session_uuid {
+            Some(session_uuid) => {
+                log::info!("Reattaching to a running pty daemon session");
+                if let Some(sender) = &model_event_sender
+                    && let Err(err) = sender.send(ModelEvent::DeleteBlocks(session_uuid))
+                {
+                    report_error!(
+                        anyhow::Error::new(err).context("Error deleting restored blocks")
+                    );
+                }
+                None
+            }
+            None => all_restored_blocks,
+        };
 
         // Create the terminal model with all restored blocks
         log::info!(
@@ -958,6 +979,15 @@ fn on_shell_determined<S: TerminalSurface>(
     let pid = pty.get_pid();
     #[cfg(unix)]
     let fd = pty.get_fd();
+
+    #[cfg(unix)]
+    if let Some(attach) = pty.attach_info() {
+        model.lock().register_session_id(attach.shell_session_id);
+        let unmute_token = attach.unmute_token.clone();
+        manager.pty_controller.update(ctx, |pty_controller, _| {
+            pty_controller.set_pty_unmute_token(unmute_token);
+        });
+    }
 
     model.lock().set_shell_process_info(ShellProcessInfo {
         pid,

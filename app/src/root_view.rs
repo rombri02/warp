@@ -773,8 +773,21 @@ fn open_from_restored(arg: &OpenFromRestoredArg, ctx: &mut AppContext) {
             )
         };
 
+        let restore_session = *GeneralSettings::as_ref(ctx).restore_session;
+        #[cfg(feature = "local_tty")]
+        {
+            let restored_terminal_pane_uuids = app_state
+                .windows
+                .iter()
+                .filter(|_| restore_session)
+                .flat_map(|window| &window.tabs)
+                .flat_map(|tab| tab.root.terminal_pane_uuids());
+            crate::terminal::local_tty::spawner::PtySpawner::as_ref(ctx)
+                .retain_sessions(restored_terminal_pane_uuids);
+        }
+
         // Check whether user has enabled session restoration.
-        if *GeneralSettings::as_ref(ctx).restore_session {
+        if restore_session {
             let mut active_index = None;
             let mut normal_window_count = 0;
             for (idx, window) in app_state.windows.iter().enumerate() {

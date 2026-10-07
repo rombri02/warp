@@ -2397,6 +2397,10 @@ impl TerminalModel {
         self.event_proxy.send_app_event(Event::Handler(event));
     }
 
+    pub fn pty_replay_finished(&mut self) {
+        self.emit_handler_event(HandlerEvent::PtyReplayFinished);
+    }
+
     /// Applies the normal command-completion pipeline and its once-per-command side effects.
     fn complete_command(&mut self, data: CompletionMetadata) {
         // If we ssh from a doesn't-understand-bracketed-paste shell into one
@@ -2630,6 +2634,7 @@ pub enum HandlerEvent {
     UnsetMode {
         mode: Mode,
     },
+    PtyReplayFinished,
 }
 
 impl ansi::Handler for TerminalModel {

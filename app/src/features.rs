@@ -67,6 +67,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::FileBackedExecutionProfiles,
         #[cfg(feature = "rect_selection")]
         FeatureFlag::RectSelection,
+        #[cfg(feature = "persistent_pty_daemon")]
+        FeatureFlag::PersistentPtyDaemon,
         #[cfg(feature = "alacritty_settings_import")]
         FeatureFlag::AlacrittySettingsImport,
         #[cfg(feature = "dynamic_workflow_enums")]

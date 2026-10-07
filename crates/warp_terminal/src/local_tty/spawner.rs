@@ -6,6 +6,7 @@ use warpui_core::{AppContext, Entity, SingletonEntity};
 use {
     crate::local_tty::server::TerminalServer, anyhow::bail, std::cmp::Reverse,
     std::collections::HashMap, std::ffi::OsString, std::process::Child,
+    warp_core::features::FeatureFlag,
 };
 
 #[cfg(target_os = "windows")]
@@ -144,7 +145,22 @@ impl PtySpawner {
     pub fn new() -> Result<Self> {
         cfg_if::cfg_if! {
             if #[cfg(unix)] {
-                let server = super::server::TerminalServer::new()?;
+                let daemon = FeatureFlag::PersistentPtyDaemon
+                    .is_enabled()
+                    .then(TerminalServer::connect_daemon)
+                    .and_then(|result| {
+                        result
+                            .map_err(|err| {
+                                report_error!(err.context(
+                                    "Failed to connect to pty daemon; falling back to terminal server"
+                                ))
+                            })
+                            .ok()
+                    });
+                let server = match daemon {
+                    Some(daemon) => daemon,
+                    None => TerminalServer::new()?,
+                };
                 Ok(Self {
                     server: Some(server),
                 })
@@ -176,9 +192,46 @@ impl PtySpawner {
         // process.
         #[cfg(unix)]
         if let Some(server) = self.server.take() {
-            log::info!("Tearing down terminal server...");
+            if server.is_daemon() {
+                log::info!("Detaching from pty daemon...");
+                server.client().detach();
+            } else {
+                log::info!("Tearing down terminal server...");
+            }
             drop(server);
         }
+    }
+
+    /// Returns whether the pty daemon is still running a session for the pane
+    /// with the given UUID, which spawning a pty for that pane will reattach to.
+    pub fn has_live_session(&self, session_uuid_hex: &str) -> bool {
+        #[cfg(unix)]
+        if let Some(server) = self.server.as_ref().filter(|server| server.is_daemon()) {
+            return server
+                .client()
+                .has_session(session_uuid_hex.to_owned())
+                .unwrap_or_else(|err| {
+                    report_error!(err.context("Failed to query pty daemon for session"));
+                    false
+                });
+        }
+        let _ = session_uuid_hex;
+        false
+    }
+
+    /// Kills detached pty daemon sessions, except those for the panes with the
+    /// given UUIDs, which are about to reattach.
+    pub fn retain_sessions(&self, session_uuids: impl IntoIterator<Item = Vec<u8>>) {
+        #[cfg(unix)]
+        if let Some(server) = self.server.as_ref().filter(|server| server.is_daemon())
+            && let Err(err) = server
+                .client()
+                .retain_sessions(session_uuids.into_iter().map(hex::encode).collect())
+        {
+            report_error!(err.context("Failed to clean up detached pty daemon sessions"));
+        }
+        #[cfg(not(unix))]
+        let _ = session_uuids;
     }
 
     /// Spawns a pty, returning information about the pty and a handle that can

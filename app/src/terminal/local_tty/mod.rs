@@ -22,8 +22,21 @@ pub fn run_terminal_server(args: &warp_cli::TerminalServerArgs) {
     );
 }
 
+#[cfg(unix)]
+pub fn run_pty_daemon(args: &warp_cli::PtyDaemonArgs) {
+    warp_terminal::local_tty::server::daemon::run_pty_daemon(
+        &args.socket,
+        crate::features::init_feature_flags,
+        crate::terminal::platform::init,
+    );
+}
+
 impl event_loop::ActiveTerminal for crate::terminal::TerminalModel {
     fn exit(&mut self, reason: crate::terminal::model::terminal_model::ExitReason) {
         crate::terminal::TerminalModel::exit(self, reason);
+    }
+
+    fn pty_replay_finished(&mut self) {
+        crate::terminal::TerminalModel::pty_replay_finished(self);
     }
 }

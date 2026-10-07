@@ -39,6 +39,10 @@ pub const SIGNALS_TOKEN: mio::Token = mio::Token(2);
 /// state.
 pub trait ActiveTerminal: ansi::Handler + Send {
     fn exit(&mut self, reason: ExitReason);
+
+    /// Called once the output a pty daemon replays when reattaching to a running
+    /// session has been parsed.
+    fn pty_replay_finished(&mut self);
 }
 
 pub struct EventLoop<P: local_tty::EventedPty, M: ActiveTerminal> {
@@ -69,6 +73,8 @@ pub struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
     writing: Option<Writing>,
     parser: ansi::Processor,
+    /// Bytes of replayed output left to parse.
+    replay_remaining: usize,
 }
 
 impl Default for State {
@@ -77,6 +83,7 @@ impl Default for State {
             write_list: VecDeque::new(),
             parser: ansi::Processor::new(),
             writing: None,
+            replay_remaining: 0,
         }
     }
 }
@@ -263,6 +270,13 @@ where
                     .push_back(Cow::Owned(terminal_response_sequences));
             }
 
+            if state.replay_remaining > 0 {
+                state.replay_remaining = state.replay_remaining.saturating_sub(bytes_in_buffer);
+                if state.replay_remaining == 0 {
+                    terminal.pty_replay_finished();
+                }
+            }
+
             bytes_processed += bytes_in_buffer;
             bytes_in_buffer = 0;
 
@@ -340,7 +354,10 @@ where
                 #[cfg(test)]
                 warp_core::features::set_overrides(feature_flag_overrides);
 
-                let mut state = State::default();
+                let mut state = State {
+                    replay_remaining: self.pty.replay_len(),
+                    ..Default::default()
+                };
                 let mut buf = [0u8; READ_BUFFER_SIZE];
 
                 // Keep track of whether we've "drained" read and write

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::prelude::*;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, bail};
 use parking_lot::Mutex;
@@ -26,6 +27,9 @@ pub struct TerminalServerClient {
     /// The set of process IDs of terminated children which have not yet been
     /// processed by the pty event loops.
     terminated_children: Arc<Mutex<HashMap<u32, ObservedExitStatus>>>,
+    /// Once set, requests to kill children are ignored, so that a pty daemon
+    /// keeps their sessions alive after this process exits.
+    is_detaching: AtomicBool,
 }
 
 impl TerminalServerClient {
@@ -39,6 +43,7 @@ impl TerminalServerClient {
         Self {
             socket_fd: Mutex::new(client_fd),
             terminated_children,
+            is_detaching: AtomicBool::new(false),
         }
     }
 
@@ -54,7 +59,7 @@ impl TerminalServerClient {
             api::Message::SpawnShellRequest {
                 options: Box::new(options),
             },
-            Option::<RawFd>::None,
+            &[],
         )?;
 
         let result = protocol::receive_message(fd.as_fd())?;
@@ -81,7 +86,8 @@ impl TerminalServerClient {
     /// Asks the server to terminate and clean up its child process with the
     /// given process ID.
     pub fn kill_child(&self, pid: u32) -> Result<()> {
-        if self.child_termination_status(pid).is_some() {
+        if self.is_detaching.load(Ordering::Relaxed) || self.child_termination_status(pid).is_some()
+        {
             return Ok(());
         }
 
@@ -89,11 +95,9 @@ impl TerminalServerClient {
         // request/response handshake.
         let fd = self.socket_fd.lock();
 
-        if let Err(error) = protocol::send_message(
-            fd.as_fd(),
-            api::Message::KillChildRequest { pid },
-            Option::<RawFd>::None,
-        ) {
+        if let Err(error) =
+            protocol::send_message(fd.as_fd(), api::Message::KillChildRequest { pid }, &[])
+        {
             if error.downcast_ref::<nix::Error>() == Some(&nix::Error::EPIPE) {
                 log::warn!(
                     "Received EPIPE when trying to kill child shell process; assuming the terminal server has terminated."
@@ -119,6 +123,37 @@ impl TerminalServerClient {
                 bail!("Received error reading message back from terminal server");
             }
         }
+    }
+
+    /// Stops honoring requests to kill children, leaving them to the pty daemon.
+    pub fn detach(&self) {
+        self.is_detaching.store(true, Ordering::Relaxed);
+    }
+
+    /// Asks the pty daemon whether a session for the given pane UUID is still running.
+    pub fn has_session(&self, session_uuid: String) -> Result<bool> {
+        match self.request(api::Message::HasSessionRequest { session_uuid })? {
+            api::Message::HasSessionResponse { exists } => Ok(exists),
+            _ => bail!("Got unexpected response to a HasSessionRequest message!"),
+        }
+    }
+
+    /// Asks the pty daemon to kill every session no client is attached to,
+    /// except those for the given pane UUIDs.
+    pub fn retain_sessions(&self, session_uuids: Vec<String>) -> Result<()> {
+        match self.request(api::Message::RetainSessionsRequest { session_uuids })? {
+            api::Message::RetainSessionsResponse => Ok(()),
+            _ => bail!("Got unexpected response to a RetainSessionsRequest message!"),
+        }
+    }
+
+    fn request(&self, message: api::Message) -> Result<api::Message> {
+        // Lock access to the socket to ensure that nothing interferes with our
+        // request/response handshake.
+        let fd = self.socket_fd.lock();
+        protocol::send_message(fd.as_fd(), message, &[])?;
+        protocol::receive_message(fd.as_fd())?
+            .ok_or_else(|| anyhow::anyhow!("Terminal server closed the connection"))
     }
 
     /// Returns and consumes the recorded exit status for the given process ID.

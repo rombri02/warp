@@ -500,6 +500,11 @@ pub enum WorkerCommand {
     #[cfg(unix)]
     TerminalServer(TerminalServerArgs),
 
+    /// Run the pty daemon, which keeps shell sessions alive across app restarts.
+    #[clap(hide = true)]
+    #[cfg(unix)]
+    PtyDaemon(PtyDaemonArgs),
+
     /// Run the minidump server.
     #[clap(hide = true)]
     MinidumpServer {
@@ -728,6 +733,14 @@ pub struct TerminalServerArgs {
     pub parent: ParentOpts,
 }
 
+#[cfg(not(windows))]
+#[derive(Debug, Clone, clap::Args)]
+pub struct PtyDaemonArgs {
+    /// The Unix socket to listen on.
+    #[clap(long)]
+    pub socket: std::path::PathBuf,
+}
+
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum RecoveryMechanism {
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -753,6 +766,15 @@ pub fn terminal_server_subcommand() -> String {
     <Args as CommandFactory>::command()
         .find_subcommand("terminal-server")
         .expect("terminal-server subcommand not found")
+        .get_name()
+        .to_string()
+}
+
+/// Returns the subcommand name to use for starting the pty daemon.
+pub fn pty_daemon_subcommand() -> String {
+    <Args as CommandFactory>::command()
+        .find_subcommand("pty-daemon")
+        .expect("pty-daemon subcommand not found")
         .get_name()
         .to_string()
 }

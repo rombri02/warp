@@ -27,6 +27,7 @@ use warp_core::cli_agent_protocol::{
 };
 use warp_core::features::FeatureFlag;
 use warp_core::safe_error;
+use warp_core::session_id::SessionId;
 use warp_errors::report_if_error;
 use warpui_core::{AppContext, SingletonEntity};
 
@@ -207,6 +208,10 @@ fn parse_passwd_line(line: &str, uid: u32) -> Option<CurrentUser> {
 pub struct Pty {
     pty_handle: Box<dyn PtyHandle>,
     fd: File,
+    /// The pty leader, when `fd` is a relay socket to a daemon-owned pty rather than the
+    /// leader itself. Only used for ioctls; reading it would steal output from the daemon.
+    ioctl_fd: Option<File>,
+    attach: Option<PtyAttachInfo>,
     token: mio::Token,
     signals: Signals,
     signals_token: mio::Token,
@@ -216,6 +221,21 @@ pub struct Pty {
 pub struct PtySpawnResult {
     pub pid: u32,
     pub leader_fd: i32,
+    pub ioctl_fd: Option<i32>,
+    /// Set when the pty daemon attached to an already-running session instead of spawning one.
+    pub attach: Option<PtyAttachInfo>,
+}
+
+/// Describes how to resume an already-running, daemon-owned session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PtyAttachInfo {
+    /// Number of bytes of recorded session output the daemon sends before live output.
+    pub replay_len: usize,
+    /// The daemon discards input until it receives these bytes, so that writes the app makes
+    /// in reaction to replayed output never reach the running process.
+    pub unmute_token: Vec<u8>,
+    /// The session ID the shell was originally bootstrapped with.
+    pub shell_session_id: SessionId,
 }
 
 pub(super) fn spawn(options: PtyOptions) -> Result<PtySpawnInfo> {
@@ -582,6 +602,8 @@ fn spawn_command_in_pty(
         result: PtySpawnResult {
             pid: spawned.id(),
             leader_fd: leader,
+            ioctl_fd: None,
+            attach: None,
         },
         child: spawned,
     })
@@ -601,10 +623,17 @@ impl Pty {
         let signals = Signals::new([signal_hook::consts::SIGCHLD])
             .context("error preparing signal handling")?;
 
-        let (PtySpawnResult { pid, leader_fd }, pty_handle) = PtySpawner::handle(ctx)
-            .update(ctx, |pty_spawner, ctx| {
-                pty_spawner.spawn_pty(options, hooks, ctx)
-            })?;
+        let (
+            PtySpawnResult {
+                pid,
+                leader_fd,
+                ioctl_fd,
+                attach,
+            },
+            pty_handle,
+        ) = PtySpawner::handle(ctx).update(ctx, |pty_spawner, ctx| {
+            pty_spawner.spawn_pty(options, hooks, ctx)
+        })?;
 
         log::info!(
             "Successfully spawned child {} process with pid {}",
@@ -623,6 +652,8 @@ impl Pty {
         let mut pty = Pty {
             pty_handle,
             fd,
+            ioctl_fd: ioctl_fd.map(|fd| unsafe { File::from_raw_fd(fd) }),
+            attach,
             token: PTY_TOKEN,
             signals,
             signals_token: SIGNALS_TOKEN,
@@ -635,8 +666,13 @@ impl Pty {
         self.pty_handle.pid()
     }
 
+    /// Returns the pty leader fd, for ioctls.
     pub fn get_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
+        self.ioctl_fd.as_ref().unwrap_or(&self.fd).as_raw_fd()
+    }
+
+    pub fn attach_info(&self) -> Option<&PtyAttachInfo> {
+        self.attach.as_ref()
     }
 }
 
@@ -717,11 +753,15 @@ impl EventedPty for Pty {
     fn on_resize(&mut self, size: &SizeInfo) {
         let win = size.to_winsize();
 
-        let res = unsafe { libc::ioctl(self.fd.as_raw_fd(), libc::TIOCSWINSZ, &win as *const _) };
+        let res = unsafe { libc::ioctl(self.get_fd(), libc::TIOCSWINSZ, &win as *const _) };
 
         if res < 0 {
             panic!("ioctl TIOCSWINSZ failed: {}", io::Error::last_os_error());
         }
+    }
+
+    fn replay_len(&self) -> usize {
+        self.attach.as_ref().map_or(0, |attach| attach.replay_len)
     }
 
     fn kill(mut self) -> Result<()> {
@@ -730,6 +770,7 @@ impl EventedPty for Pty {
         // hang. Closing the pty explicitly fixes it, though the reason is unclear;
         // it appears to be a kernel bug.
         std::mem::drop(self.fd);
+        std::mem::drop(self.ioctl_fd);
         let result = self.pty_handle.kill();
         report_if_error!(result);
         result

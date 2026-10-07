@@ -103,6 +103,21 @@ pub enum PaneNodeSnapshot {
 }
 
 impl PaneNodeSnapshot {
+    /// Returns the UUIDs of the terminal panes in this subtree.
+    pub fn terminal_pane_uuids(&self) -> Vec<Vec<u8>> {
+        match self {
+            PaneNodeSnapshot::Leaf(LeafSnapshot {
+                contents: LeafContents::Terminal(terminal),
+                ..
+            }) => vec![terminal.uuid.clone()],
+            PaneNodeSnapshot::Leaf(_) => vec![],
+            PaneNodeSnapshot::Branch(BranchSnapshot { children, .. }) => children
+                .iter()
+                .flat_map(|(_, child)| child.terminal_pane_uuids())
+                .collect(),
+        }
+    }
+
     pub fn has_horizontal_split(&self) -> bool {
         match self {
             PaneNodeSnapshot::Leaf(_) => false,

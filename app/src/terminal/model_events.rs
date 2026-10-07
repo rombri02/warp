@@ -201,6 +201,7 @@ impl ModelEventDispatcher {
             Event::Handler(HandlerEvent::UnsetMode {
                 mode: ansi::Mode::BracketedPaste,
             }) => ModelEvent::Handler(AnsiHandlerEvent::UnsetBracketedPaste),
+            Event::Handler(HandlerEvent::PtyReplayFinished) => ModelEvent::PtyReplayFinished,
             Event::CompletionsFinished(res, replacement_span) => {
                 ModelEvent::CompletionsFinished(res, replacement_span)
             }
@@ -466,6 +467,9 @@ pub enum ModelEvent {
         image_protocol: ImageProtocol,
     },
     BootstrapPrecmdDone,
+    /// Emitted once the output replayed by the pty daemon when reattaching to a
+    /// running session has been parsed, after the events it produced.
+    PtyReplayFinished,
     AgentTaggedInChanged {
         block_id: BlockId,
         is_tagged_in: bool,

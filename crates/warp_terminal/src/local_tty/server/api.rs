@@ -59,4 +59,21 @@ pub(super) enum Message {
     ChildrenTerminatedRequest {
         children: Vec<(u32, ObservedExitStatus)>,
     },
+    /// A message sent from client -> pty daemon asking whether a live session
+    /// exists for the given pane UUID.
+    HasSessionRequest { session_uuid: String },
+    /// The response for a `HasSessionRequest`.  Should only be sent from
+    /// pty daemon -> client.
+    HasSessionResponse { exists: bool },
+    /// A message sent from client -> pty daemon requesting that the daemon
+    /// kill every session that no client is attached to, except those for the
+    /// given pane UUIDs.
+    RetainSessionsRequest { session_uuids: Vec<String> },
+    /// The response for a `RetainSessionsRequest`.  Should only be sent from
+    /// pty daemon -> client.
+    RetainSessionsResponse,
+    /// The first message a client sends on a connection to the pty daemon to
+    /// receive fire-and-forget messages (e.g. `ChildrenTerminatedRequest`) on
+    /// it.  This has no matching response message.
+    SubscribeRequest,
 }

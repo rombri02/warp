@@ -20,17 +20,23 @@
 
 mod api;
 mod client;
+pub mod daemon;
 mod event_loop;
 mod logging;
 mod protocol;
 
 use std::collections::HashMap;
+use std::os::unix::net::UnixStream;
 use std::os::unix::prelude::*;
+use std::path::Path;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use command::blocking::Command;
 use cvt::cvt;
+use instant::Instant;
 use nix::sys::socket;
 use parking_lot::Mutex;
 use warp_errors::report_error;
@@ -122,8 +128,9 @@ fn spawn_message_receiver_thread(
 /// than communicating with the grandchild via the terminal server as an
 /// intermediary.
 pub(super) struct TerminalServer {
-    /// The terminal server child process.
-    server: std::process::Child,
+    /// The terminal server child process, or `None` when connected to a pty
+    /// daemon, which must outlive this process.
+    server: Option<std::process::Child>,
 
     /// A client for communicating with the terminal server process.
     client: Arc<TerminalServerClient>,
@@ -206,8 +213,44 @@ impl TerminalServer {
                 terminated_children,
             ));
 
-            Ok(Self { server, client })
+            Ok(Self {
+                server: Some(server),
+                client,
+            })
         }
+    }
+
+    /// Connects to the pty daemon for the current channel, spawning it if it
+    /// isn't running.
+    pub fn connect_daemon() -> Result<Self> {
+        let socket_path = daemon::socket_path();
+        let control = match UnixStream::connect(&socket_path) {
+            Ok(control) => control,
+            Err(_) => {
+                log::info!("Spawning pty daemon at {}...", socket_path.display());
+                spawn_daemon(&socket_path)?;
+                connect_with_retry(&socket_path)?
+            }
+        };
+
+        let events =
+            UnixStream::connect(&socket_path).context("Failed to connect to pty daemon")?;
+        protocol::send_message(events.as_fd(), api::Message::SubscribeRequest, &[])?;
+        let terminated_children = Arc::new(Mutex::new(HashMap::new()));
+        // The subscription lives as long as this process does.
+        spawn_message_receiver_thread(events.into_raw_fd(), terminated_children.clone());
+
+        Ok(Self {
+            server: None,
+            client: Arc::new(TerminalServerClient::new(
+                control.into(),
+                terminated_children,
+            )),
+        })
+    }
+
+    pub fn is_daemon(&self) -> bool {
+        self.server.is_none()
     }
 
     /// Returns an API client for interacting with the terminal server.
@@ -219,8 +262,50 @@ impl TerminalServer {
 impl Drop for TerminalServer {
     fn drop(&mut self) {
         // Kill the server child process and wait for it to terminate.
-        let _ = self.server.kill();
-        let _ = self.server.wait();
+        if let Some(server) = &mut self.server {
+            let _ = server.kill();
+            let _ = server.wait();
+        }
+    }
+}
+
+/// Spawns the pty daemon in its own session, so that it survives this process.
+fn spawn_daemon(socket_path: &Path) -> Result<()> {
+    let program =
+        std::env::current_exe().context("Failed to determine path to current executable")?;
+    let log_file = std::fs::File::create(socket_path.with_extension("log"))
+        .context("Failed to create pty daemon log file")?;
+    let mut command = Command::new(program);
+    command
+        .arg(warp_cli::pty_daemon_subcommand())
+        .arg("--socket")
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(log_file);
+    unsafe {
+        command.pre_exec(|| {
+            cvt(libc::setsid())?;
+            Ok(())
+        });
+    }
+    command.spawn().context("Failed to spawn pty daemon")?;
+    Ok(())
+}
+
+fn connect_with_retry(socket_path: &Path) -> Result<UnixStream> {
+    const TIMEOUT: Duration = Duration::from_secs(5);
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+    let start = Instant::now();
+    loop {
+        match UnixStream::connect(socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(err) if start.elapsed() >= TIMEOUT => {
+                return Err(err).context("Timed out connecting to pty daemon");
+            }
+            Err(_) => std::thread::sleep(POLL_INTERVAL),
+        }
     }
 }
 

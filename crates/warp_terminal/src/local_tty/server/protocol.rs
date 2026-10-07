@@ -42,8 +42,9 @@ impl AsRawFd for NonblockingSocketFd {
 }
 
 /// The type of the additional data that we might send as a control message
-/// as part of a [`sendmsg`](socket::sendmsg) call.
-type AuxData = [RawFd; 1];
+/// as part of a [`sendmsg`](socket::sendmsg) call: a pty leader fd and, for
+/// daemon-owned ptys, a second fd used only for ioctls.
+type AuxData = [RawFd; 2];
 
 /// The data structure that we serialize and send across the socket.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,13 +70,13 @@ impl Message {
 
 /// Sends a message across the provided Unix domain socket.
 ///
-/// A file descriptor can optionally be provided to send across the socket.  The
-/// provided file descriptor is copied across the socket, and is not guaranteed
+/// File descriptors can optionally be provided to send across the socket.  The
+/// provided file descriptors are copied across the socket, and are not guaranteed
 /// to have the same index on the receiving end.
 pub(super) fn send_message(
     socket_fd: impl AsRawFd,
     data: api::Message,
-    aux_fd: Option<RawFd>,
+    aux_fds: &[RawFd],
 ) -> Result<()> {
     let msg = Message::new(data);
     let mut serialized_msg = bincode::serialize(&msg)?;
@@ -89,13 +90,11 @@ pub(super) fn send_message(
     buf.append(&mut serialized_msg);
     let iov = IoSlice::new(&buf);
 
-    // If we're sending a file descriptor alongside the message, build the
-    // control message that we will send it within.
-    let mut fds = vec![];
+    // If we're sending file descriptors alongside the message, build the
+    // control message that we will send them within.
     let mut control_msgs = vec![];
-    if let Some(aux_fd) = aux_fd {
-        fds.push(aux_fd);
-        control_msgs.push(socket::ControlMessage::ScmRights(fds.as_slice()));
+    if !aux_fds.is_empty() {
+        control_msgs.push(socket::ControlMessage::ScmRights(aux_fds));
     }
 
     // Push the message data and any control messages across the socket.
@@ -176,7 +175,12 @@ fn try_receive_message_internal(socket_fd: impl AsRawFd) -> Result<TryReceiveMes
     // Extract extra information from Unix domain socket control messages for
     // api::Message variants which require it.
     if let api::Message::SpawnShellResponse {
-        spawn_result: api::Result::Ok(PtySpawnResult { leader_fd, .. }),
+        spawn_result:
+            api::Result::Ok(PtySpawnResult {
+                leader_fd,
+                ioctl_fd,
+                ..
+            }),
         ..
     } = &mut message.data
     {
@@ -184,13 +188,14 @@ fn try_receive_message_internal(socket_fd: impl AsRawFd) -> Result<TryReceiveMes
             [socket::ControlMessageOwned::ScmRights(fds)] => {
                 let Some(received_fd) = fds.first() else {
                     bail!(
-                        "Received {} fds alongside a SpawnShellResponse message; expected 1",
+                        "Received {} fds alongside a SpawnShellResponse message; expected 1 or 2",
                         fds.len()
                     );
                 };
-                // Set the `leader_fd` field in the `TtySpawnResult` to the
-                // value we received in the control message.
+                // Replace the sender's fd numbers in the `PtySpawnResult` with
+                // the values we received in the control message.
                 *leader_fd = *received_fd;
+                *ioctl_fd = fds.get(1).copied();
             }
             _ => {
                 bail!(

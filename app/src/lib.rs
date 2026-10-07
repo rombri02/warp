@@ -874,6 +874,11 @@ fn run_worker_command(worker: &warp_cli::WorkerCommand) -> Result<()> {
             crate::terminal::local_tty::run_terminal_server(args);
             Ok(())
         }
+        #[cfg(all(feature = "local_tty", unix))]
+        warp_cli::WorkerCommand::PtyDaemon(args) => {
+            crate::terminal::local_tty::run_pty_daemon(args);
+            Ok(())
+        }
         #[cfg(feature = "local_tty")]
         warp_cli::WorkerCommand::MinidumpServer { socket_name } => {
             cfg_if::cfg_if! {

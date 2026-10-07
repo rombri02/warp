@@ -13619,6 +13619,7 @@ impl TerminalView {
             ModelEvent::BootstrapPrecmdDone => {
                 self.execute_pending_command((), ctx);
             }
+            ModelEvent::PtyReplayFinished => {}
             ModelEvent::AgentTaggedInChanged {
                 block_id,
                 is_tagged_in,

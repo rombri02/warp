@@ -207,7 +207,7 @@ impl EventLoop {
                                     api::Message::ChildrenTerminatedRequest {
                                         children: terminated_children,
                                     },
-                                    Option::<RawFd>::None,
+                                    &[],
                                 ) {
                                     log::error!(
                                         "Failed to notify host process about terminated children: {err:#}"
@@ -281,7 +281,7 @@ impl EventLoop {
                         api::Message::SpawnShellResponse {
                             spawn_result: result.into(),
                         },
-                        leader_fd,
+                        leader_fd.as_slice(),
                     ) {
                         log::error!(
                             "Encountered unexpected error sending message to host process: {err:#}"
@@ -314,7 +314,7 @@ impl EventLoop {
                     if let Err(err) = protocol::send_message(
                         RECV_SOCKET_FILENO,
                         api::Message::KillChildResponse { error_msg },
-                        Option::<RawFd>::None,
+                        &[],
                     ) {
                         log::error!(
                             "Encountered unexpected error sending message to host process: {err:#}"
@@ -338,6 +338,13 @@ impl EventLoop {
                     report_error!(
                         "Terminal server received unexpected ChildrenTerminatedRequest message!"
                     );
+                }
+                api::Message::HasSessionRequest { .. }
+                | api::Message::HasSessionResponse { .. }
+                | api::Message::RetainSessionsRequest { .. }
+                | api::Message::RetainSessionsResponse
+                | api::Message::SubscribeRequest => {
+                    report_error!("Terminal server received unexpected pty daemon message!");
                 }
             }
         }

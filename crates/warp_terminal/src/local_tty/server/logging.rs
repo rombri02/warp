@@ -44,9 +44,7 @@ impl RemoteLogger {
 
                     let socket_fd_lock = socket_fd.lock();
                     'inner: loop {
-                        if let Err(err) =
-                            protocol::send_message(*socket_fd_lock, message, Option::<RawFd>::None)
-                        {
+                        if let Err(err) = protocol::send_message(*socket_fd_lock, message, &[]) {
                             // In failing tests, the app shuts down abruptly and this
                             // message pollutes the test output.
                             if !cfg!(feature = "integration_tests") {

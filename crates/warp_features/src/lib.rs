@@ -121,6 +121,10 @@ pub enum FeatureFlag {
     /// Enables rect selection.
     RectSelection,
 
+    /// Keeps shell sessions alive in a detached PTY daemon across app restarts, reattaching
+    /// restored panes to their still-running processes.
+    PersistentPtyDaemon,
+
     /// Adds Alacritty as a supported terminal to import settings from.
     AlacrittySettingsImport,
 

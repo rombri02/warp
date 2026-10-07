@@ -79,6 +79,12 @@ pub trait EventedPty: EventedReadWrite {
 
     /// Terminate the PTY process
     fn kill(self) -> Result<()>;
+
+    /// Number of bytes of recorded output that precede live output, when
+    /// reattaching to a running session.
+    fn replay_len(&self) -> usize {
+        0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

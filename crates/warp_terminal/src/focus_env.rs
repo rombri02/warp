@@ -25,6 +25,13 @@ pub fn add_session_focus_env_vars(env_vars: &mut HashMap<OsString, OsString>, se
     );
 }
 
+/// Returns the hex-encoded session UUID set by [`add_session_focus_env_vars`], if any.
+pub fn session_uuid_from_env_vars(env_vars: &HashMap<OsString, OsString>) -> Option<&str> {
+    env_vars
+        .get(&OsString::from(TERMINAL_SESSION_UUID_ENV))
+        .and_then(|uuid| uuid.to_str())
+}
+
 #[cfg(test)]
 #[path = "focus_env_tests.rs"]
 mod tests;
