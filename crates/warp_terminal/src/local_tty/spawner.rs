@@ -157,6 +157,9 @@ impl PtySpawner {
                             })
                             .ok()
                     });
+                if !FeatureFlag::PersistentPtyDaemon.is_enabled() {
+                    TerminalServer::retire_daemon();
+                }
                 let server = match daemon {
                     Some(daemon) => daemon,
                     None => TerminalServer::new()?,

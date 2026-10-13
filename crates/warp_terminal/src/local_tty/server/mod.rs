@@ -224,6 +224,15 @@ impl TerminalServer {
     /// isn't running.
     pub fn connect_daemon() -> Result<Self> {
         let socket_path = daemon::socket_path();
+        // The daemon receives every shell's environment and hands back ptys, so only ever
+        // talk to one started by the current user.
+        if let Ok(metadata) = std::fs::symlink_metadata(&socket_path) {
+            anyhow::ensure!(
+                metadata.uid() == unsafe { libc::geteuid() },
+                "Pty daemon socket {} is owned by another user",
+                socket_path.display()
+            );
+        }
         let control = match UnixStream::connect(&socket_path) {
             Ok(control) => control,
             Err(_) => {
@@ -247,6 +256,26 @@ impl TerminalServer {
                 terminated_children,
             )),
         })
+    }
+
+    /// Kills the detached sessions of a pty daemon left over from when the daemon was enabled,
+    /// since nothing will reattach to them; the daemon then exits once it is idle. Sessions that
+    /// a client is attached to (e.g. another running app instance) are left alone.
+    pub fn retire_daemon() {
+        let socket_path = daemon::socket_path();
+        if !std::fs::symlink_metadata(&socket_path)
+            .is_ok_and(|metadata| metadata.uid() == unsafe { libc::geteuid() })
+        {
+            return;
+        }
+        let Ok(stream) = UnixStream::connect(&socket_path) else {
+            return;
+        };
+        log::info!("Retiring the pty daemon's detached sessions...");
+        let client = TerminalServerClient::new(stream.into(), Default::default());
+        if let Err(err) = client.retain_sessions(Vec::new()) {
+            log::warn!("Failed to retire pty daemon sessions: {err:#}");
+        }
     }
 
     pub fn is_daemon(&self) -> bool {

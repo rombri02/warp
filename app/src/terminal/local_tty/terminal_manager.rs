@@ -983,10 +983,13 @@ fn on_shell_determined<S: TerminalSurface>(
     #[cfg(unix)]
     if let Some(attach) = pty.attach_info() {
         model.lock().register_session_id(attach.shell_session_id);
-        let unmute_token = attach.unmute_token.clone();
-        manager.pty_controller.update(ctx, |pty_controller, _| {
-            pty_controller.set_pty_unmute_token(unmute_token);
-        });
+        // An empty token means the daemon had nothing to replay and isn't muting input.
+        if !attach.unmute_token.is_empty() {
+            let unmute_token = attach.unmute_token.clone();
+            manager.pty_controller.update(ctx, |pty_controller, _| {
+                pty_controller.set_pty_unmute_token(unmute_token);
+            });
+        }
     }
 
     model.lock().set_shell_process_info(ShellProcessInfo {

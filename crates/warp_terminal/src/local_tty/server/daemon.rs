@@ -17,10 +17,10 @@ use std::os::unix::prelude::*;
 use std::path::{Path, PathBuf};
 use std::process::Child;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
@@ -45,15 +45,37 @@ const LOG_TAIL_CAPACITY: usize = 7 << 20;
 /// How long to wait for a session's remaining output after its shell exits.
 const DRAIN_TIMEOUT: Duration = Duration::from_millis(500);
 
-/// Returns the path of the socket the daemon for the current channel listens on.
+/// How long a write to an attached client may block before the client is considered stuck and
+/// detached. Output is relayed while holding the session's output lock, so without a bound a
+/// client that stops reading would freeze the session and every request that touches it.
+const ATTACHMENT_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long a killed session may ignore SIGHUP before it is killed outright.
+const KILL_GRACE_PERIOD: Duration = Duration::from_secs(2);
+
+/// Sessions no client has been attached to for this long are killed. Reattaching is meant for
+/// an app restart or crash; without a limit, sessions that no pane will ever claim again (e.g.
+/// the app was never reopened, or session restoration lost them) would run forever.
+const ORPHANED_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const ORPHAN_CHECK_INTERVAL: Duration = Duration::from_secs(10 * 60);
+
+/// How long a starting daemon waits for a previous one that is shutting down.
+const INSTANCE_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Returns the path of the socket the daemon for the current channel and user listens on.
 pub fn socket_path() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(format!(
-            "warp-pty-{}-v{PROTOCOL_VERSION}.sock",
-            ChannelState::channel()
-        ))
+    let channel = ChannelState::channel();
+    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime_dir)
+            .join(format!("warp-pty-{channel}-v{PROTOCOL_VERSION}.sock"));
+    }
+    // macOS gives every user their own temporary directory.
+    if cfg!(target_os = "macos") {
+        return std::env::temp_dir().join(format!("warp-pty-{channel}-v{PROTOCOL_VERSION}.sock"));
+    }
+    // Elsewhere it is usually a shared `/tmp`, so keep users apart.
+    let uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("warp-pty-{uid}-{channel}-v{PROTOCOL_VERSION}.sock"))
 }
 
 /// Runs the pty daemon, listening on `socket_path`, until it has neither sessions
@@ -68,8 +90,19 @@ pub fn run_pty_daemon(
     log::set_max_level(log::LevelFilter::Info);
     init_platform().expect("should not fail to perform platform-level terminal initialization");
 
+    // A second daemon (e.g. two app processes spawning one at once) would replace the first
+    // one's socket, leaving the first one's sessions running but unreachable.
+    let Some(_instance_lock) = acquire_instance_lock(&socket_path.with_extension("lock")) else {
+        log::info!("Another pty daemon is running for this socket; exiting.");
+        return;
+    };
+
     let _ = std::fs::remove_file(socket_path);
-    let listener = UnixListener::bind(socket_path).expect("should be able to bind daemon socket");
+    // Create the socket owner-only from the start, rather than restricting it after `bind`.
+    let previous_umask = unsafe { libc::umask(0o077) };
+    let listener = UnixListener::bind(socket_path);
+    unsafe { libc::umask(previous_umask) };
+    let listener = listener.expect("should be able to bind daemon socket");
     std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))
         .expect("should be able to restrict daemon socket permissions");
     log::info!("Pty daemon listening on {}", socket_path.display());
@@ -78,9 +111,19 @@ pub fn run_pty_daemon(
         socket_path: socket_path.to_owned(),
         state: Default::default(),
     });
+    let reaper = daemon.clone();
+    thread::spawn(move || {
+        loop {
+            thread::sleep(ORPHAN_CHECK_INTERVAL);
+            reaper.kill_orphaned_sessions();
+        }
+    });
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                // Counted before the connection is served, so that `exit_if_idle` can't shut
+                // the daemon down under a client that just connected.
+                daemon.state.lock().clients += 1;
                 let daemon = daemon.clone();
                 thread::spawn(move || daemon.serve(stream));
             }
@@ -106,6 +149,8 @@ struct DaemonState {
 
 struct Session {
     pid: u32,
+    /// Set once the shell has been reaped, after which its pid may belong to another process.
+    exited: AtomicBool,
     /// `None` for sessions that no pane can reattach to; those are killed on detach.
     uuid: Option<String>,
     shell_session_id: SessionId,
@@ -116,6 +161,19 @@ struct Session {
 struct Output {
     log: OutputLog,
     attachment: Option<Attachment>,
+    /// When the last client detached, while none is attached. Wall-clock time, so that time
+    /// the machine spends asleep counts.
+    detached_since: Option<SystemTime>,
+}
+
+impl Output {
+    /// Detaches the current client, if any, closing its relay socket so that it notices.
+    fn detach_client(&mut self) {
+        if let Some(attachment) = self.attachment.take() {
+            let _ = attachment.socket.shutdown(std::net::Shutdown::Both);
+            self.detached_since = Some(SystemTime::now());
+        }
+    }
 }
 
 struct Attachment {
@@ -128,8 +186,8 @@ struct Attachment {
 static NEXT_ATTACHMENT_ID: AtomicU64 = AtomicU64::new(0);
 
 impl Daemon {
+    /// Serves a client connection, which the accept loop has already counted in `clients`.
     fn serve(self: Arc<Self>, stream: UnixStream) {
-        self.state.lock().clients += 1;
         loop {
             let message = match protocol::receive_message(stream.as_fd()) {
                 Ok(Some(message)) => message,
@@ -273,9 +331,11 @@ impl Daemon {
             uuid,
             shell_session_id,
             leader: unsafe { File::from_raw_fd(spawned.result.leader_fd) },
+            exited: AtomicBool::new(false),
             output: Mutex::new(Output {
                 log: OutputLog::default(),
                 attachment: None,
+                detached_since: None,
             }),
         });
         let (client_socket, _) = session.attach(false)?;
@@ -302,7 +362,10 @@ impl Daemon {
 
         let daemon = self.clone();
         thread::spawn(move || {
-            let status = child.wait().map_or(ObservedExitStatus::Unavailable, observed_exit_status);
+            let status = child
+                .wait()
+                .map_or(ObservedExitStatus::Unavailable, observed_exit_status);
+            session.exited.store(true, Ordering::Release);
             // Background jobs may keep the pty open after the shell exits, so
             // don't wait forever for the output to drain.
             let _ = drained_rx.recv_timeout(DRAIN_TIMEOUT);
@@ -332,6 +395,32 @@ impl Daemon {
         self.exit_if_idle();
     }
 
+    /// Kills the sessions no client has been attached to for [`ORPHANED_SESSION_TIMEOUT`].
+    fn kill_orphaned_sessions(&self) {
+        let sessions = self
+            .state
+            .lock()
+            .sessions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for session in sessions {
+            let orphaned = session
+                .output
+                .lock()
+                .detached_since
+                .and_then(|since| since.elapsed().ok())
+                .is_some_and(|elapsed| elapsed >= ORPHANED_SESSION_TIMEOUT);
+            if orphaned {
+                log::info!(
+                    "Killing session with pid {} left unattached for too long",
+                    session.pid
+                );
+                session.kill();
+            }
+        }
+    }
+
     fn exit_if_idle(&self) {
         let state = self.state.lock();
         if state.sessions.is_empty() && state.clients == 0 {
@@ -349,22 +438,38 @@ impl Session {
     fn attach(self: &Arc<Self>, replay: bool) -> Result<(UnixStream, Option<PtyAttachInfo>)> {
         let (socket, client_socket) =
             UnixStream::pair().context("Failed to create relay socket pair")?;
+        // Applies to every clone of `socket`: they share the underlying socket.
+        socket
+            .set_write_timeout(Some(ATTACHMENT_WRITE_TIMEOUT))
+            .context("Failed to set relay socket write timeout")?;
         let id = NEXT_ATTACHMENT_ID.fetch_add(1, Ordering::Relaxed);
 
         let mut output = self.output.lock();
         let replay = replay.then(|| (output.log.snapshot(), output.log.total));
-        if let Some(previous) = output.attachment.replace(Attachment {
+        // With nothing recorded there is nothing to replay, so input isn't muted either: the
+        // client would never finish a replay of zero bytes and so never unmute.
+        let has_recording = replay
+            .as_ref()
+            .is_some_and(|(recorded, _)| !recorded.is_empty());
+        output.detach_client();
+        output.attachment = Some(Attachment {
             id,
             socket: socket.try_clone()?,
-            replaying: replay.is_some(),
-        }) {
-            let _ = previous.socket.shutdown(std::net::Shutdown::Both);
-        }
+            replaying: has_recording,
+        });
+        output.detached_since = None;
         drop(output);
 
         let mut attach_info = None;
         let mut unmute_token = None;
-        if let Some((recorded, recorded_total)) = replay {
+        if replay.is_some() && !has_recording {
+            attach_info = Some(PtyAttachInfo {
+                replay_len: 0,
+                unmute_token: Vec::new(),
+                shell_session_id: self.shell_session_id,
+            });
+        }
+        if let Some((recorded, recorded_total)) = replay.filter(|_| has_recording) {
             let mut token = vec![0; 16];
             rand::thread_rng().fill_bytes(&mut token);
             // Wrapped in an APC sequence so it is inert if it ever reaches the shell.
@@ -386,16 +491,24 @@ impl Session {
     }
 
     fn replay(&self, id: u64, mut socket: UnixStream, recorded: Vec<u8>, recorded_total: usize) {
-        if socket.write_all(&recorded).is_err() {
-            return;
-        }
+        let replayed = socket.write_all(&recorded).is_ok();
         let mut output = self.output.lock();
-        let since = output.log.since(recorded_total);
-        if let Some(attachment) = output.attachment.as_mut().filter(|a| a.id == id) {
-            attachment.replaying = false;
-            if attachment.socket.write_all(&since).is_err() {
-                output.attachment = None;
-            }
+        let Output {
+            log, attachment, ..
+        } = &mut *output;
+        let Some(attachment) = attachment.as_mut().filter(|a| a.id == id) else {
+            return;
+        };
+        attachment.replaying = false;
+        // On failure, detach rather than leave the attachment "replaying" forever, which
+        // would hold back its live output.
+        if !replayed
+            || attachment
+                .socket
+                .write_all(&log.since(recorded_total))
+                .is_err()
+        {
+            output.detach_client();
         }
     }
 
@@ -414,12 +527,21 @@ impl Session {
             if let Some(attachment) = output.attachment.as_mut().filter(|a| !a.replaying)
                 && attachment.socket.write_all(&buf[..len]).is_err()
             {
-                output.attachment = None;
+                log::info!(
+                    "Detaching unresponsive client from session with pid {}",
+                    self.pid
+                );
+                output.detach_client();
             }
         }
     }
 
-    fn relay_input(&self, id: u64, mut socket: UnixStream, mut unmute_token: Option<Vec<u8>>) {
+    fn relay_input(
+        self: &Arc<Self>,
+        id: u64,
+        mut socket: UnixStream,
+        mut unmute_token: Option<Vec<u8>>,
+    ) {
         let mut buf = vec![0; 0x1_0000];
         let mut muted_input = Vec::new();
         loop {
@@ -450,7 +572,7 @@ impl Session {
 
         let mut output = self.output.lock();
         if output.attachment.as_ref().is_some_and(|a| a.id == id) {
-            output.attachment = None;
+            output.detach_client();
             drop(output);
             log::info!("Client detached from session with pid {}", self.pid);
             if self.uuid.is_none() {
@@ -470,10 +592,55 @@ impl Session {
         }
     }
 
-    fn kill(&self) {
-        unsafe {
-            libc::kill(self.pid as libc::pid_t, libc::SIGKILL);
+    /// Hangs the session up the way closing a terminal window does: SIGHUP lets the shell
+    /// hang up its jobs too (a SIGKILLed shell would leave background jobs running, holding the
+    /// pty open), and a shell still running after [`KILL_GRACE_PERIOD`] is killed outright.
+    fn kill(self: &Arc<Self>) {
+        if self.exited.load(Ordering::Acquire) {
+            return;
         }
+        unsafe {
+            let pgrp = libc::tcgetpgrp(self.leader.as_raw_fd());
+            if pgrp > 0 {
+                libc::killpg(pgrp, libc::SIGHUP);
+            }
+            libc::kill(self.pid as libc::pid_t, libc::SIGHUP);
+            // Resume a stopped shell so that it can act on the SIGHUP.
+            libc::kill(self.pid as libc::pid_t, libc::SIGCONT);
+        }
+        let session = self.clone();
+        thread::spawn(move || {
+            thread::sleep(KILL_GRACE_PERIOD);
+            if !session.exited.load(Ordering::Acquire) {
+                unsafe {
+                    libc::kill(session.pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        });
+    }
+}
+
+/// Takes the lock that keeps a single daemon per socket, waiting briefly for a daemon that is
+/// shutting down. Returns `None` while another daemon holds it. The lock lasts as long as the
+/// returned file stays open.
+fn acquire_instance_lock(path: &Path) -> Option<File> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|err| log::warn!("Failed to open pty daemon lock file: {err:#}"))
+        .ok()?;
+    let start = SystemTime::now();
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Some(file);
+        }
+        if start.elapsed().unwrap_or_default() >= INSTANCE_LOCK_TIMEOUT {
+            return None;
+        }
+        thread::sleep(Duration::from_millis(50));
     }
 }
 
