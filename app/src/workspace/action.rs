@@ -546,6 +546,9 @@ pub enum WorkspaceAction {
     FocusTerminalViewInWorkspace {
         terminal_view_id: EntityId,
     },
+    /// Switches the vertical tabs AGENTS section between grouped and priority order.
+    ToggleCliAgentsSort,
+    ToggleCliAgentsSectionCollapsed,
     /// Focus a specific pane by its locator (pane_group_id and pane_id).
     FocusPane(PaneViewLocator),
     /// Start a new AI conversation in a terminal view. This sets the pending query state
@@ -1161,6 +1164,8 @@ impl WorkspaceAction {
             | OpenAIFactCollection
             | OpenMCPServerCollection
             | FocusTerminalViewInWorkspace { .. }
+            | ToggleCliAgentsSort
+            | ToggleCliAgentsSectionCollapsed
             | FocusPane(..)
             | ShiftSelectTabRange { .. }
             | ToggleTabMultiSelection { .. }

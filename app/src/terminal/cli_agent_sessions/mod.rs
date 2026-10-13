@@ -2,6 +2,7 @@ pub mod event;
 pub mod listener;
 #[cfg(not(target_family = "wasm"))]
 pub(crate) mod plugin_manager;
+pub mod screen_detection;
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -402,6 +403,8 @@ pub struct CLIAgentSessionsModel {
     /// Source of `CtrlCCancelState::armed_token` values. Monotonically increasing;
     /// never reused, so a stale callback can never alias a newer window.
     next_ctrl_c_token: u64,
+    /// Sessions whose status comes from `screen_detection` rather than a plugin.
+    screen_detected: HashSet<EntityId>,
 }
 
 impl Entity for CLIAgentSessionsModel {
@@ -417,7 +420,58 @@ impl CLIAgentSessionsModel {
             plugin_auto_failures: HashSet::new(),
             ctrl_c_cancel_state: HashMap::new(),
             next_ctrl_c_token: 0,
+            screen_detected: HashSet::new(),
         }
+    }
+
+    /// Whether the session's status is known, either from its plugin or from the screen.
+    pub fn has_known_status(&self, terminal_view_id: EntityId) -> bool {
+        self.screen_detected.contains(&terminal_view_id)
+            || self
+                .sessions
+                .get(&terminal_view_id)
+                .is_some_and(CLIAgentSession::supports_rich_status)
+    }
+
+    /// Applies a status inferred by `screen_detection`. Ignored once the plugin reports status.
+    pub fn set_screen_detected_status(
+        &mut self,
+        terminal_view_id: EntityId,
+        status: CLIAgentSessionStatus,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        let Some(session) = self
+            .sessions
+            .get_mut(&terminal_view_id)
+            .filter(|session| !session.supports_rich_status())
+        else {
+            return;
+        };
+        let newly_detected = self.screen_detected.insert(terminal_view_id);
+        if session.status == status && !newly_detected {
+            return;
+        }
+        let previous = std::mem::replace(&mut session.status, status.clone());
+        // An agent seen idle at its prompt only "completed" something if it was seen working
+        // first; otherwise (it just started, or a dialog was dismissed) update silently, since
+        // `StatusChanged` notifies the user.
+        let is_completion = matches!(status, CLIAgentSessionStatus::Success)
+            && !newly_detected
+            && matches!(previous, CLIAgentSessionStatus::InProgress);
+        if matches!(status, CLIAgentSessionStatus::Success) && !is_completion {
+            ctx.emit(CLIAgentSessionsModelEvent::SessionUpdated {
+                terminal_view_id,
+                agent: session.agent,
+            });
+            return;
+        }
+        ctx.emit(CLIAgentSessionsModelEvent::StatusChanged {
+            terminal_view_id,
+            agent: session.agent,
+            status,
+            is_prompt_submit: false,
+            session_context: Box::new(session.session_context.clone()),
+        });
     }
 
     pub fn session(&self, terminal_view_id: EntityId) -> Option<&CLIAgentSession> {
@@ -500,6 +554,7 @@ impl CLIAgentSessionsModel {
     pub fn remove_session(&mut self, terminal_view_id: EntityId, ctx: &mut ModelContext<Self>) {
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        self.screen_detected.remove(&terminal_view_id);
         if let Some(session) = self.sessions.remove(&terminal_view_id) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,
@@ -799,6 +854,7 @@ impl CLIAgentSessionsModel {
         // arm, and any pending window belonged to the session being replaced.
         self.abort_pending_cancel(terminal_view_id);
         self.ctrl_c_cancel_state.remove(&terminal_view_id);
+        self.screen_detected.remove(&terminal_view_id);
         if let Some(old) = self.sessions.insert(terminal_view_id, session) {
             ctx.emit(CLIAgentSessionsModelEvent::Ended {
                 terminal_view_id,

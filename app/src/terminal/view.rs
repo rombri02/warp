@@ -406,6 +406,9 @@ use crate::terminal::cli_agent_sessions::event::{
 use crate::terminal::cli_agent_sessions::listener::{CLIAgentSessionListener, is_agent_supported};
 #[cfg(not(target_family = "wasm"))]
 use crate::terminal::cli_agent_sessions::plugin_manager::{PluginModalKind, plugin_manager_for};
+use crate::terminal::cli_agent_sessions::screen_detection::{
+    self, SCREEN_POLL_INTERVAL, has_screen_rules,
+};
 use crate::terminal::cli_agent_sessions::{
     CLIAgentInputEntrypoint, CLIAgentInputState, CLIAgentRichInputCloseReason, CLIAgentSession,
     CLIAgentSessionContext, CLIAgentSessionStatus, CLIAgentSessionsModel,
@@ -2962,6 +2965,9 @@ pub struct TerminalView {
     /// terminal view (not a specific agent view conversation).
     pending_cloud_mode_start_callback: Option<TerminalViewCallback>,
     pending_cloud_mode_start_abort_handle: Option<SpawnedFutureHandle>,
+    /// Pending tick of the screen poll that infers the status of a plugin-less CLI agent.
+    cli_agent_screen_poll: Option<SpawnedFutureHandle>,
+    cli_agent_screen_debouncer: screen_detection::StatusDebouncer,
 
     /// Active /init flow model, if any. Cleared when cancelled or completed.
     active_init_project_model: Option<ModelHandle<InitProjectModel>>,
@@ -4538,6 +4544,8 @@ impl TerminalView {
             pane_stack: None,
             pending_cloud_mode_start_callback: None,
             pending_cloud_mode_start_abort_handle: None,
+            cli_agent_screen_poll: None,
+            cli_agent_screen_debouncer: Default::default(),
             ephemeral_message_model,
             pty_recorder: ctx
                 .add_model(|ctx| PtyRecorder::new(inactive_pty_reads_rx, window_id, ctx)),
@@ -14192,6 +14200,40 @@ impl TerminalView {
         }
     }
 
+    /// Schedules the next poll of the screen of a plugin-less CLI agent, replacing a pending one.
+    fn schedule_cli_agent_screen_poll(&mut self, ctx: &mut ViewContext<Self>) {
+        if let Some(handle) = self.cli_agent_screen_poll.take() {
+            handle.abort();
+        }
+        self.cli_agent_screen_poll = Some(ctx.spawn_abortable(
+            Timer::after(SCREEN_POLL_INTERVAL),
+            |me, _, ctx| me.poll_cli_agent_screen(ctx),
+            |_, _| (),
+        ));
+    }
+
+    /// Re-schedules itself until the session ends or its plugin starts reporting status.
+    fn poll_cli_agent_screen(&mut self, ctx: &mut ViewContext<Self>) {
+        self.cli_agent_screen_poll = None;
+        let Some(agent) = CLIAgentSessionsModel::as_ref(ctx)
+            .session(self.view_id)
+            .filter(|session| !session.supports_rich_status())
+            .map(|session| session.agent)
+        else {
+            return;
+        };
+        let screen_tail = screen_detection::screen_tail(&self.model.lock());
+        if let Some(status) = screen_detection::detect_status(agent, &screen_tail)
+            .and_then(|status| self.cli_agent_screen_debouncer.observe(status))
+        {
+            let view_id = self.view_id;
+            CLIAgentSessionsModel::handle(ctx).update(ctx, |sessions, ctx| {
+                sessions.set_screen_detected_status(view_id, status, ctx);
+            });
+        }
+        self.schedule_cli_agent_screen_poll(ctx);
+    }
+
     /// Handles CLI agent session status changes from the singleton model.
     /// Sends a desktop notification when a CLI agent reaches a completed state
     /// (blocked or succeeded) and the user is in a different window.
@@ -14205,13 +14247,20 @@ impl TerminalView {
     ) {
         match event {
             CLIAgentSessionsModelEvent::Started {
-                terminal_view_id, ..
+                terminal_view_id,
+                agent,
             } if *terminal_view_id == self.view_id => {
-                let mut model = self.model.lock();
-                let active_block = model.block_list_mut().active_block_mut();
-                active_block.enable_full_grid_clear_behavior();
-                if FeatureFlag::TrimTrailingBlankLines.is_enabled() {
-                    active_block.set_trim_trailing_blank_rows(true);
+                {
+                    let mut model = self.model.lock();
+                    let active_block = model.block_list_mut().active_block_mut();
+                    active_block.enable_full_grid_clear_behavior();
+                    if FeatureFlag::TrimTrailingBlankLines.is_enabled() {
+                        active_block.set_trim_trailing_blank_rows(true);
+                    }
+                }
+                if FeatureFlag::CLIAgentsSidebar.is_enabled() && has_screen_rules(*agent) {
+                    self.cli_agent_screen_debouncer = Default::default();
+                    self.schedule_cli_agent_screen_poll(ctx);
                 }
             }
             CLIAgentSessionsModelEvent::Ended {

@@ -2,6 +2,7 @@ pub(crate) mod agent_cli_launch_modal;
 pub(crate) mod auto_handoff_sleep_modal;
 mod build_plan_migration_modal;
 pub(crate) mod chatgpt_plan_modal;
+mod cli_agents_section;
 pub(crate) mod cloud_agent_capacity_modal;
 pub(crate) mod codex_modal;
 pub mod conversation_list;
@@ -120,6 +121,7 @@ use warpui::{
     UpdateModel, UpdateView, View, ViewAsRef, ViewContext, ViewHandle, WeakViewHandle, WindowId,
 };
 
+use self::cli_agents_section::CliAgentSort;
 use self::vertical_tabs::telemetry::{VerticalTabsDisplayOption, VerticalTabsTelemetryEvent};
 use self::vertical_tabs::{
     SummaryPaneKind, SummaryPaneKindIcons, VERTICAL_TABS_SETTINGS_BUTTON_POSITION_ID,
@@ -3649,6 +3651,11 @@ impl Workspace {
         event: &AgentManagementEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        // Read state drives the AGENTS section's "done" vs "idle", in every window.
+        if self.is_cli_agents_section_visible() {
+            ctx.notify();
+        }
+
         // Only process events for the active window.
         if ctx
             .windows()
@@ -3789,18 +3796,26 @@ impl Workspace {
         })
     }
 
+    /// Whether this window shows the vertical tabs AGENTS section, which lists the CLI agents of
+    /// every window and so must re-render on their changes too.
+    fn is_cli_agents_section_visible(&self) -> bool {
+        FeatureFlag::CLIAgentsSidebar.is_enabled() && self.vertical_tabs_panel_open
+    }
+
     fn handle_cli_agent_sessions_event(
         &mut self,
         event: &CLIAgentSessionsModelEvent,
         ctx: &mut ViewContext<Self>,
     ) {
+        // The vertical tabs AGENTS section lists agents from every window.
         if matches!(
             event,
             CLIAgentSessionsModelEvent::Started { .. }
                 | CLIAgentSessionsModelEvent::StatusChanged { .. }
                 | CLIAgentSessionsModelEvent::Ended { .. }
                 | CLIAgentSessionsModelEvent::SessionUpdated { .. }
-        ) && self.workspace_contains_terminal_view(event.terminal_view_id(), ctx)
+        ) && (self.is_cli_agents_section_visible()
+            || self.workspace_contains_terminal_view(event.terminal_view_id(), ctx))
         {
             ctx.notify();
         }
@@ -25743,6 +25758,19 @@ impl TypedActionView for Workspace {
                 if !self.focus_terminal_view_locally(*terminal_view_id, ctx) {
                     self.focus_terminal_view_in_other_window(*terminal_view_id, ctx);
                 }
+            }
+            ToggleCliAgentsSort => {
+                let cli_agents = &mut self.vertical_tabs_panel.cli_agents;
+                cli_agents.sort = match cli_agents.sort {
+                    CliAgentSort::Grouped => CliAgentSort::Priority,
+                    CliAgentSort::Priority => CliAgentSort::Grouped,
+                };
+                ctx.notify();
+            }
+            ToggleCliAgentsSectionCollapsed => {
+                let cli_agents = &mut self.vertical_tabs_panel.cli_agents;
+                cli_agents.is_collapsed = !cli_agents.is_collapsed;
+                ctx.notify();
             }
             FocusPane(locator) => {
                 self.focus_pane(*locator, ctx);

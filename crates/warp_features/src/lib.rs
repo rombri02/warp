@@ -799,6 +799,10 @@ pub enum FeatureFlag {
     /// Requires HOANotifications to also be enabled.
     GeminiNotifications,
 
+    /// Lists running CLI agent sessions (Claude Code, Codex, etc.) from every window and tab in
+    /// the vertical tabs panel and the conversation list panel.
+    CLIAgentsSidebar,
+
     /// When enabled, the "Skip for now" login flow does not create a Firebase
     /// anonymous user. The user remains fully logged out (no credentials) and
     /// login-gated features are disabled until they sign in.
@@ -1065,6 +1069,7 @@ pub const DOGFOOD_FLAGS: &[FeatureFlag] = &[
     FeatureFlag::CodeReviewScrollPreservation,
     FeatureFlag::RememberFastForwardState,
     FeatureFlag::GeminiNotifications,
+    FeatureFlag::CLIAgentsSidebar,
     FeatureFlag::LocalDockerSandbox,
     #[cfg(not(windows))]
     FeatureFlag::SshRemoteServer,

@@ -35,6 +35,7 @@ use warpui::ui_components::components::{UiComponent, UiComponentStyles};
 use warpui::ui_components::text_input::TextInput;
 use warpui::{AppContext, EntityId, SingletonEntity, ViewHandle, WindowId};
 
+use super::cli_agents_section::{CliAgentsSectionState, render_cli_agents_section};
 use super::{render_group_member_icon_collage, select_unique_pane_kinds};
 use crate::ai::agent::conversation::{ConversationStatus, StatusColorStyle};
 use crate::ai::agent_management::AgentNotificationsModel;
@@ -338,7 +339,7 @@ impl PaneRowStackPosition {
     }
 }
 
-fn pane_row_background(
+pub(crate) fn pane_row_background(
     pane_color: Option<ThemeFill>,
     is_selected: bool,
     is_in_multi_selection: bool,
@@ -730,6 +731,7 @@ pub(super) struct VerticalTabsPanelState {
     show_details_on_hover_mouse_state: MouseStateHandle,
     panel_right_click_mouse_state: MouseStateHandle,
     pub(super) show_settings_popup: bool,
+    pub(super) cli_agents: CliAgentsSectionState,
 }
 
 impl Default for VerticalTabsPanelState {
@@ -768,6 +770,7 @@ impl Default for VerticalTabsPanelState {
             show_details_on_hover_mouse_state: Default::default(),
             panel_right_click_mouse_state: Default::default(),
             show_settings_popup: false,
+            cli_agents: CliAgentsSectionState::default(),
         }
     }
 }
@@ -1668,6 +1671,30 @@ fn render_new_tab_button(
     .finish()
 }
 
+/// Stacks the AGENTS section at the bottom with the tab list above it. The section takes the space
+/// it needs up to half of the panel, scrolling beyond that, and the tab list gets the rest, so
+/// many agents never squeeze the tabs out of view.
+fn render_tabs_and_agents(
+    state: &VerticalTabsPanelState,
+    scrollable_groups: Box<dyn Element>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    // Flex hands flexible children space in order, proportionally to their flex: with equal
+    // factors the agents section, laid out first, may claim at most half of it, and whatever it
+    // leaves goes to the tab list.
+    const AGENTS_SECTION_FLEX: f32 = 1.;
+    Flex::column()
+        .with_reverse_orientation()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_children(
+            render_cli_agents_section(&state.cli_agents, app)
+                .map(|section| Shrinkable::new(AGENTS_SECTION_FLEX, section).finish()),
+        )
+        .with_child(Expanded::new(1., scrollable_groups).finish())
+        .finish()
+}
+
 fn render_vertical_tabs_panel(
     state: &VerticalTabsPanelState,
     workspace: &Workspace,
@@ -1697,7 +1724,9 @@ fn render_vertical_tabs_panel(
             &workspace.vertical_tabs_search_input,
             app,
         ))
-        .with_child(Shrinkable::new(1., scrollable_groups).finish())
+        .with_child(
+            Shrinkable::new(1., render_tabs_and_agents(state, scrollable_groups, app)).finish(),
+        )
         .finish();
 
     // Catch-all drop target so a pane dragged into any gap not covered by a
@@ -5736,6 +5765,19 @@ fn render_pull_request_badge_content(label: &str, appearance: &Appearance) -> Bo
                 .finish(),
         )
         .finish()
+}
+
+/// Each visible pane's tint as vertical tabs render it. Uncolored panes are omitted.
+pub(crate) fn tab_pane_tints(tab: &TabData, app: &AppContext) -> HashMap<PaneId, ThemeFill> {
+    let pane_group = tab.pane_group.as_ref(app);
+    let visible_pane_ids = pane_group.visible_pane_ids();
+    let theme = Appearance::as_ref(app).theme();
+    compute_tab_group_color_mode(tab, pane_group, &visible_pane_ids, theme, app)
+        .into_per_pane_colors(&visible_pane_ids)
+        .into_iter()
+        .flatten()
+        .filter_map(|(pane_id, tint)| Some((pane_id, tint?)))
+        .collect()
 }
 
 /// Resolves the rendered color mode for a tab's panes from the tab's own color,

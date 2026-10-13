@@ -1456,3 +1456,52 @@ fn second_ctrl_c_while_armed_reuses_the_existing_window() {
         });
     });
 }
+
+/// Records which `CLIAgentSessionsModel` events would notify the user (`StatusChanged`) versus
+/// only refresh the UI (`SessionUpdated`).
+fn record_status_events(
+    app: &mut App,
+    model: &warpui::ModelHandle<CLIAgentSessionsModel>,
+) -> std::rc::Rc<std::cell::RefCell<Vec<&'static str>>> {
+    let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = events.clone();
+    app.update(|ctx| {
+        ctx.subscribe_to_model(model, move |_, event, _| {
+            recorded.borrow_mut().push(match event {
+                super::CLIAgentSessionsModelEvent::StatusChanged { .. } => "status",
+                super::CLIAgentSessionsModelEvent::SessionUpdated { .. } => "updated",
+                _ => "other",
+            });
+        });
+    });
+    events
+}
+
+#[test]
+fn screen_detected_idle_only_notifies_after_working() {
+    App::test((), |mut app| async move {
+        let model = app.add_singleton_model(|_| CLIAgentSessionsModel::new());
+        let view_id = EntityId::new();
+        model.update(&mut app, |m, ctx| {
+            let mut session = cli_agent_session(CLIAgentSessionStatus::InProgress, false);
+            session.agent = CLIAgent::Antigravity;
+            m.set_session(view_id, session, ctx);
+        });
+        let events = record_status_events(&mut app, &model);
+
+        // First seen idle right after starting: not a completed task.
+        model.update(&mut app, |m, ctx| {
+            m.set_screen_detected_status(view_id, CLIAgentSessionStatus::Success, ctx)
+        });
+        assert_eq!(*events.borrow(), ["updated"]);
+        assert!(model.read(&app, |m, _| m.has_known_status(view_id)));
+
+        model.update(&mut app, |m, ctx| {
+            m.set_screen_detected_status(view_id, CLIAgentSessionStatus::InProgress, ctx);
+            m.set_screen_detected_status(view_id, CLIAgentSessionStatus::Success, ctx);
+            // Unchanged status: no event at all.
+            m.set_screen_detected_status(view_id, CLIAgentSessionStatus::Success, ctx);
+        });
+        assert_eq!(*events.borrow(), ["updated", "status", "status"]);
+    });
+}

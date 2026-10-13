@@ -471,6 +471,8 @@ fn enabled_features() -> HashSet<FeatureFlag> {
         FeatureFlag::HandoffLocalCloud,
         #[cfg(feature = "hoa_notifications")]
         FeatureFlag::HOANotifications,
+        #[cfg(feature = "cli_agents_sidebar")]
+        FeatureFlag::CLIAgentsSidebar,
         #[cfg(feature = "open_code_notifications")]
         FeatureFlag::OpenCodeNotifications,
         #[cfg(feature = "cli_agent_rich_input")]
